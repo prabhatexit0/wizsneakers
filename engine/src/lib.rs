@@ -4,6 +4,7 @@ pub mod models;
 pub mod util;
 pub mod data;
 pub mod state;
+pub mod world;
 
 // Re-export commonly used types
 pub use models::{Faction, Stats};
@@ -11,6 +12,7 @@ pub use state::{GameState, GameMode};
 pub use util::rng::SeededRng;
 
 use state::player::Direction;
+use world::map::MapData;
 
 // ── Tile types ──
 
@@ -23,10 +25,10 @@ const MAP_HEIGHT: usize = 15;
 pub struct GameEngine {
     state: GameState,
     rng: SeededRng,
-    map: Vec<u8>, // 0=floor, 1=wall, 2=tall_grass
+    map: Vec<u8>, // current collision data (updated by load_map_data)
     map_width: usize,
     map_height: usize,
-    // Transient per-tick state (not persisted to GameState yet — PRD 04+)
+    current_map: Option<MapData>, // loaded map metadata (encounters, connections, etc.)
     step_count: u32,
     encounter_triggered: bool,
 }
@@ -73,9 +75,15 @@ impl GameEngine {
             map,
             map_width: MAP_WIDTH,
             map_height: MAP_HEIGHT,
+            current_map: None,
             step_count: 0,
             encounter_triggered: false,
         }
+    }
+
+    /// Load map data from a JSON string. Updates collision, dimensions, and encounter table.
+    pub fn load_map_data(&mut self, json: &str) -> Result<(), JsValue> {
+        self.load_map_from_json(json).map_err(|e| JsValue::from_str(&e))
     }
 
     /// Process one game tick. direction: 0=none, 1=up, 2=down, 3=left, 4=right
@@ -116,9 +124,18 @@ impl GameEngine {
         self.state.player.y = ny as u16;
         self.step_count += 1;
 
-        // Tall grass encounter check (~15% chance) using SeededRng
-        if tile == 2 {
-            if self.rng.chance(15) {
+        // Tall grass encounter check (~15% chance)
+        if tile == 2 && self.rng.chance(15) {
+            if let Some(ref map) = self.current_map {
+                // Use the map's encounter table for weighted species selection
+                if let Some(_result) = world::encounters::check_wild_encounter(
+                    &map.wild_encounters,
+                    &mut self.rng,
+                ) {
+                    self.encounter_triggered = true;
+                }
+            } else {
+                // Fallback: hardcoded map has no encounter table
                 self.encounter_triggered = true;
             }
         }
@@ -133,7 +150,7 @@ impl GameEngine {
     pub fn step_count(&self) -> u32 { self.step_count }
     pub fn encounter_triggered(&self) -> bool { self.encounter_triggered }
 
-    /// Get tile at position
+    /// Get tile at position (returns collision byte)
     pub fn get_tile(&self, x: usize, y: usize) -> u8 {
         if x >= self.map_width || y >= self.map_height {
             return 1;
@@ -155,5 +172,17 @@ impl GameEngine {
             "story_progress": self.state.story_progress,
         })
         .to_string()
+    }
+}
+
+impl GameEngine {
+    /// Internal map loader — not exposed to WASM directly but usable in tests.
+    pub fn load_map_from_json(&mut self, json: &str) -> Result<(), String> {
+        let map_data = MapData::from_json(json)?;
+        self.map_width = map_data.width as usize;
+        self.map_height = map_data.height as usize;
+        self.map = map_data.collision.clone();
+        self.current_map = Some(map_data);
+        Ok(())
     }
 }
