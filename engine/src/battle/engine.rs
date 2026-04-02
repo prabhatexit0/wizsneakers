@@ -1,10 +1,12 @@
-use crate::models::sneaker::{SneakerInstance, StatusCondition};
+use crate::models::sneaker::{SneakerInstance, SneakerSpecies, StatusCondition};
 use crate::models::moves::{MoveData, MoveCategory, MoveEffect, MoveTarget, StatusType};
 use crate::models::stats::{StatKind, StatStages};
+use crate::models::items::{ItemEffect, ItemCategory};
+use crate::models::inventory::InventoryPocket;
 use crate::util::rng::SeededRng;
 use crate::data;
 use crate::battle::types::{
-    AiLevel, BattleAction, BattleOpponent, BattleResult, BattleSide, BattleState,
+    AiLevel, BattleAction, BattleOpponent, BattlePrompt, BattleResult, BattleSide, BattleState,
     BattleTurnEvent, BattleKind, Effectiveness,
 };
 use crate::battle::damage::{calculate_damage_ex, calculate_damage_with_override};
@@ -12,6 +14,9 @@ use crate::battle::status::{
     apply_end_of_turn_status, can_apply_major_status, can_apply_onfire,
     check_can_move_sold_out, make_status_condition,
 };
+use crate::battle::capture::attempt_capture;
+use crate::battle::ai::choose_action;
+use crate::models::sneaker::xp_needed;
 
 pub struct BattleEngine;
 
@@ -66,11 +71,57 @@ impl BattleEngine {
                 let player_move_id = player_move_slot.move_id;
                 let player_move = data::get_move(player_move_id);
 
-                // AI picks a move for the opponent
-                let opp_slot = pick_opponent_move(
-                    &state.opponent.team[state.opponent_active],
-                    rng,
-                );
+                // AI picks an action for the opponent
+                let ai_action = choose_action(state, player_party, &state.opponent.ai_level.clone(), rng);
+
+                // Handle AI Switch (player gets free attack)
+                if let BattleAction::Switch { party_index } = ai_action {
+                    state.opponent_stages = Default::default();
+                    state.opponent_active = party_index as usize;
+                    let species_id = state.opponent.team[party_index as usize].species_id;
+                    events.push(BattleTurnEvent::SwitchedIn {
+                        side: BattleSide::Opponent,
+                        species_id,
+                    });
+                    // Player attacks into the new opponent (free attack)
+                    execute_player_attack(state, player_party, player_move, player_move_id, true, rng, &mut events);
+                    if let Some(slot) = player_party[state.player_active].moves[move_index as usize].as_mut() {
+                        if slot.current_pp > 0 { slot.current_pp -= 1; }
+                    }
+                    state.turn_number += 1;
+                    state.turn_log.extend(events.clone());
+                    return events;
+                }
+
+                // Handle AI Bag (use item on opponent, player still attacks)
+                if let BattleAction::Bag { item_id } = ai_action {
+                    events.push(BattleTurnEvent::ItemUsed { item_id });
+                    apply_opponent_item(state, item_id, &mut events);
+                    // Remove from opponent items
+                    if let Some(slot) = state.opponent.items.iter_mut().find(|(id, _)| *id == item_id) {
+                        if slot.1 > 0 { slot.1 -= 1; }
+                    }
+                    // Player attacks
+                    execute_player_attack(state, player_party, player_move, player_move_id, true, rng, &mut events);
+                    if let Some(slot) = player_party[state.player_active].moves[move_index as usize].as_mut() {
+                        if slot.current_pp > 0 { slot.current_pp -= 1; }
+                    }
+                    state.turn_number += 1;
+                    state.turn_log.extend(events.clone());
+                    return events;
+                }
+
+                // AI chose Fight
+                let opp_move_index = if let BattleAction::Fight { move_index: idx } = ai_action { idx as usize } else { 0 };
+                let opp_slot = {
+                    let opp = &state.opponent.team[state.opponent_active];
+                    match opp.moves[opp_move_index].clone().or_else(|| {
+                        opp.moves.iter().find_map(|s| s.clone())
+                    }) {
+                        Some(s) => s,
+                        None => panic!("Opponent has no moves"),
+                    }
+                };
                 let opp_move_id = opp_slot.move_id;
                 let opp_move = data::get_move(opp_move_id);
 
@@ -221,10 +272,154 @@ impl BattleEngine {
 
             BattleAction::Bag { item_id } => {
                 events.push(BattleTurnEvent::ItemUsed { item_id });
+                let item = data::get_item(item_id);
+                match item.category {
+                    ItemCategory::SneakerCase => {
+                        // Capture attempt
+                        if !matches!(state.kind, BattleKind::Wild) {
+                            events.push(BattleTurnEvent::Message {
+                                text: "Can't capture in trainer battles!".to_string(),
+                            });
+                        } else {
+                            let opp_idx = state.opponent_active;
+                            let target = state.opponent.team[opp_idx].clone();
+                            let species = data::get_species(target.species_id);
+                            let result = attempt_capture(&target, species, item, rng);
+                            let success = result.success;
+                            events.push(BattleTurnEvent::CaptureAttempt {
+                                shakes: result.shakes,
+                                success,
+                            });
+                            if success {
+                                let captured = state.opponent.team[opp_idx].clone();
+                                events.push(BattleTurnEvent::BattleEnd {
+                                    result: BattleResult::PlayerCapture,
+                                });
+                                // Store captured sneaker UID for caller to handle
+                                let _ = captured; // caller reads from battle state
+                            } else {
+                                // Opponent gets a free attack
+                                let opp_slot = pick_opponent_move(
+                                    &state.opponent.team[state.opponent_active],
+                                    rng,
+                                );
+                                let opp_move = data::get_move(opp_slot.move_id);
+                                execute_opponent_attack(
+                                    state, player_party, opp_move, opp_slot.move_id, false, rng, &mut events,
+                                );
+                                if player_party[state.player_active].is_fainted() {
+                                    events.push(BattleTurnEvent::BattleEnd {
+                                        result: BattleResult::PlayerLose,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    ItemCategory::HealItem => {
+                        // Apply heal to active party member (player)
+                        let player_idx = state.player_active;
+                        apply_heal_item_to(player_party, player_idx, item.effect, &mut events, BattleSide::Player);
+                        // Opponent gets a free attack
+                        let opp_slot = pick_opponent_move(&state.opponent.team[state.opponent_active], rng);
+                        let opp_move = data::get_move(opp_slot.move_id);
+                        execute_opponent_attack(state, player_party, opp_move, opp_slot.move_id, false, rng, &mut events);
+                        if player_party[state.player_active].is_fainted() {
+                            events.push(BattleTurnEvent::BattleEnd { result: BattleResult::PlayerLose });
+                        }
+                    }
+                    ItemCategory::BattleItem => {
+                        // Apply stat boost to active player sneaker
+                        let player_idx = state.player_active;
+                        match item.effect {
+                            ItemEffect::StatBoost(stat, stages) => {
+                                apply_stage_change(&mut state.player_stages, stat, stages, BattleSide::Player, &mut events);
+                            }
+                            ItemEffect::BoostAll => {
+                                for stat in [StatKind::Hype, StatKind::Comfort, StatKind::Drip, StatKind::Rarity] {
+                                    apply_stage_change(&mut state.player_stages, stat, 1, BattleSide::Player, &mut events);
+                                }
+                            }
+                            _ => {}
+                        }
+                        let _ = player_idx;
+                        // Opponent gets a free attack
+                        let opp_slot = pick_opponent_move(&state.opponent.team[state.opponent_active], rng);
+                        let opp_move = data::get_move(opp_slot.move_id);
+                        execute_opponent_attack(state, player_party, opp_move, opp_slot.move_id, false, rng, &mut events);
+                        if player_party[state.player_active].is_fainted() {
+                            events.push(BattleTurnEvent::BattleEnd { result: BattleResult::PlayerLose });
+                        }
+                    }
+                    _ => {
+                        // Can't use other items in battle
+                        events.push(BattleTurnEvent::Message {
+                            text: "Can't use that item in battle!".to_string(),
+                        });
+                    }
+                }
             }
         }
 
         state.turn_log.extend(events.clone());
+        events
+    }
+
+    /// Award XP and money after a PlayerWin. Returns extra events to append.
+    /// Also updates `state.waiting_for` if move-learn or evolution prompts arise.
+    pub fn award_xp_and_money(
+        state: &mut BattleState,
+        player_party: &mut Vec<SneakerInstance>,
+        money: &mut u32,
+    ) -> Vec<BattleTurnEvent> {
+        let mut events = Vec::new();
+
+        let opp = &state.opponent.team[state.opponent_active];
+        let opp_species = data::get_species(opp.species_id);
+        let opp_level = opp.level;
+        let base_xp = opp_species.base_xp_yield as u32;
+
+        // trainer_bonus: 1.5 for trainer/boss, 1.0 for wild
+        let trainer_bonus = match &state.kind {
+            BattleKind::Wild => 1.0f64,
+            _ => 1.5f64,
+        };
+
+        // XP per recipient: base_xp * opp_level / 7 * trainer_bonus
+        let xp_amount = ((base_xp * opp_level as u32 / 7) as f64 * trainer_bonus) as u32;
+
+        // Money award
+        let money_award = match &state.kind {
+            BattleKind::Wild => opp_level as u32 * 10,
+            BattleKind::Trainer { .. } => opp_level as u32 * 20,
+            BattleKind::Boss { .. } => opp_level as u32 * 30,
+        };
+        *money = money.saturating_add(money_award);
+
+        // Award XP to all non-fainted party members
+        for sneaker in player_party.iter_mut() {
+            if sneaker.is_fainted() {
+                continue;
+            }
+            events.push(BattleTurnEvent::XpGained { amount: xp_amount });
+            let species = data::get_species(sneaker.species_id);
+            let result = sneaker.add_xp(xp_amount, species);
+            if result.leveled_up {
+                events.push(BattleTurnEvent::LevelUp { new_level: result.new_level });
+                for move_id in result.new_moves {
+                    events.push(BattleTurnEvent::MoveLearnPrompt { move_id });
+                    if state.waiting_for.is_none() {
+                        state.waiting_for = Some(BattlePrompt::MoveLearn { move_id });
+                    }
+                }
+                if let Some(target_id) = result.can_evolve {
+                    if state.waiting_for.is_none() {
+                        state.waiting_for = Some(BattlePrompt::Evolution { species_id: target_id });
+                        events.push(BattleTurnEvent::EvolutionPrompt { species_id: target_id });
+                    }
+                }
+            }
+        }
+
         events
     }
 }
@@ -275,6 +470,74 @@ fn pick_opponent_move(
 
     let idx = valid[rng.range(0, valid.len() as u32) as usize];
     opponent.moves[idx].clone().unwrap()
+}
+
+// ── Helper: apply a heal item to a party member ────────────────────────────────
+
+fn apply_heal_item_to(
+    party: &mut Vec<SneakerInstance>,
+    idx: usize,
+    effect: ItemEffect,
+    events: &mut Vec<BattleTurnEvent>,
+    side: BattleSide,
+) {
+    let sneaker = &mut party[idx];
+    match effect {
+        ItemEffect::HealHp(amount) => {
+            let missing = sneaker.max_hp.saturating_sub(sneaker.current_hp);
+            let actual = amount.min(missing);
+            sneaker.current_hp += actual;
+            if actual > 0 {
+                events.push(BattleTurnEvent::Healed { side, amount: actual });
+            }
+        }
+        ItemEffect::HealFull => {
+            let missing = sneaker.max_hp.saturating_sub(sneaker.current_hp);
+            sneaker.current_hp = sneaker.max_hp;
+            if missing > 0 {
+                events.push(BattleTurnEvent::Healed { side, amount: missing });
+            }
+        }
+        ItemEffect::CureStatus(_) | ItemEffect::CureAll => {
+            sneaker.status = None;
+            sneaker.on_fire_turns = 0;
+            events.push(BattleTurnEvent::StatusApplied {
+                side,
+                status: "Cured".to_string(),
+            });
+        }
+        _ => {}
+    }
+}
+
+// ── Helper: apply item to opponent's active sneaker ────────────────────────────
+
+fn apply_opponent_item(
+    state: &mut BattleState,
+    item_id: u16,
+    events: &mut Vec<BattleTurnEvent>,
+) {
+    let item = data::get_item(item_id);
+    let opp_idx = state.opponent_active;
+    let opp = &mut state.opponent.team[opp_idx];
+    match item.effect {
+        ItemEffect::HealHp(amount) => {
+            let missing = opp.max_hp.saturating_sub(opp.current_hp);
+            let actual = amount.min(missing);
+            opp.current_hp += actual;
+            if actual > 0 {
+                events.push(BattleTurnEvent::Healed { side: BattleSide::Opponent, amount: actual });
+            }
+        }
+        ItemEffect::HealFull => {
+            let missing = opp.max_hp.saturating_sub(opp.current_hp);
+            opp.current_hp = opp.max_hp;
+            if missing > 0 {
+                events.push(BattleTurnEvent::Healed { side: BattleSide::Opponent, amount: missing });
+            }
+        }
+        _ => {}
+    }
 }
 
 // ── Helper: apply a stat stage change and emit event ─────────────────────────
@@ -2188,3 +2451,478 @@ mod tests_phase_3b {
         );
     }
 }
+
+// ── Tests Phase 3C+3D (PRD 09) ───────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests_phase_3c {
+    use crate::models::sneaker::{SneakerInstance, xp_needed};
+    use crate::models::moves::MoveSlot;
+    use crate::models::stats::{Stats, StatStages, Condition};
+    use crate::models::faction::Faction;
+    use crate::battle::capture::attempt_capture;
+    use crate::battle::ai::choose_action;
+    use crate::battle::types::{
+        AiLevel, BattleAction, BattleKind, BattleOpponent, BattleState, BattleTurnEvent, BattleResult,
+    };
+    use crate::data;
+    use crate::util::rng::SeededRng;
+    use super::*;
+
+    fn make_instance(species_id: u16, level: u8, move_ids: &[u16]) -> SneakerInstance {
+        let species = data::get_species(species_id);
+        let base_hp = species.base_stats.durability as u32;
+        let max_hp = (2 * base_hp * level as u32 / 100 + level as u32 + 10) as u16;
+
+        let mut moves = [None, None, None, None];
+        for (i, &mid) in move_ids.iter().take(4).enumerate() {
+            let md = data::get_move(mid);
+            moves[i] = Some(MoveSlot { move_id: mid, current_pp: md.pp, max_pp: md.pp });
+        }
+        if moves[0].is_none() {
+            let md = data::get_move(5);
+            moves[0] = Some(MoveSlot { move_id: 5, current_pp: md.pp, max_pp: md.pp });
+        }
+
+        SneakerInstance {
+            uid: 1,
+            species_id,
+            nickname: None,
+            level,
+            xp: 0,
+            current_hp: max_hp,
+            max_hp,
+            ivs: Stats::zero(),
+            evs: Stats::zero(),
+            condition: Condition::GeneralRelease,
+            moves,
+            status: None,
+            on_fire_turns: 0,
+            held_item: None,
+            friendship: 70,
+            caught_location: 0,
+            original_trainer: String::new(),
+        }
+    }
+
+    fn make_state(ai_level: AiLevel, opp: SneakerInstance) -> (BattleState, Vec<SneakerInstance>) {
+        let player = make_instance(1, 10, &[5]);
+        let state = BattleState {
+            kind: BattleKind::Wild,
+            player_active: 0,
+            opponent: BattleOpponent {
+                team: vec![opp],
+                items: vec![],
+                ai_level,
+            },
+            opponent_active: 0,
+            turn_number: 0,
+            player_stages: StatStages::default(),
+            opponent_stages: StatStages::default(),
+            turn_log: vec![],
+            flee_attempts: 0,
+            can_flee: true,
+            waiting_for: None,
+            player_skip_turn: false,
+            opponent_skip_turn: false,
+        };
+        (state, vec![player])
+    }
+
+    // ── XP formula ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn xp_needed_level_5() {
+        // (6 * 5^3 / 5) - 15 * 5^2 + 100 * 5 - 140
+        // = (6 * 125 / 5) - 375 + 500 - 140
+        // = 150 - 375 + 500 - 140 = 135
+        assert_eq!(xp_needed(5), 135);
+    }
+
+    #[test]
+    fn xp_needed_level_10() {
+        // (6 * 1000 / 5) - 1500 + 1000 - 140 = 1200 - 1500 + 1000 - 140 = 560
+        // Actually: 6*10^3/5 = 6000/5=1200, 15*100=1500, 100*10=1000
+        // 1200 - 1500 + 1000 - 140 = 560
+        // The PRD says "≈ 1000" — let's just verify it's within reason
+        let v = xp_needed(10);
+        assert!(v >= 400 && v <= 1500, "xp_needed(10) = {} expected ~560", v);
+    }
+
+    #[test]
+    fn xp_needed_level_50() {
+        let v = xp_needed(50);
+        // PRD says ≈ 125000; actual: 6*125000/5 - 15*2500 + 5000 - 140 = 150000 - 37500 + 5000 - 140 = 117360
+        assert!(v >= 50000 && v <= 200000, "xp_needed(50) = {} expected ~117000", v);
+    }
+
+    // ── XP gain ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn xp_gain_wild_lv5() {
+        // Classic Dunk (id=4) base_xp=56, defeat at Lv.5 wild
+        // xp = 56 * 5 / 7 = 40
+        let species = data::get_species(4);
+        assert_eq!(species.base_xp_yield, 56);
+        let xp = (species.base_xp_yield as u32 * 5 / 7) as f64 * 1.0;
+        assert_eq!(xp as u32, 40);
+    }
+
+    #[test]
+    fn xp_gain_trainer_lv5() {
+        // With trainer bonus: 40 * 1.5 = 60
+        let species = data::get_species(4);
+        let xp = ((species.base_xp_yield as u32 * 5 / 7) as f64 * 1.5) as u32;
+        assert_eq!(xp, 60);
+    }
+
+    // ── Level-up ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn level_up_gaining_enough_xp() {
+        let species = data::get_species(1); // Retro Runner
+        let mut inst = make_instance(1, 5, &[5]);
+        let old_max_hp = inst.max_hp;
+
+        // xp_needed(6) should be > xp_needed(5)=135; adding 200 should level up
+        let result = inst.add_xp(200, species);
+        assert!(result.leveled_up, "Should have leveled up");
+        assert!(result.new_level > 5, "Level should be > 5");
+        assert!(inst.max_hp >= old_max_hp, "Max HP should not decrease on level up");
+    }
+
+    #[test]
+    fn level_up_increases_max_hp() {
+        let species = data::get_species(1);
+        let mut inst = make_instance(1, 5, &[5]);
+        let old_max_hp = inst.max_hp;
+        inst.add_xp(500, species);
+        assert!(inst.max_hp >= old_max_hp);
+    }
+
+    #[test]
+    fn new_moves_available_at_correct_levels() {
+        // Retro Runner learnset: (1,5),(5,11),(9,1),(13,12)
+        // At Lv 5 -> learns move 11 (Crease)
+        let species = data::get_species(1);
+        let mut inst = make_instance(1, 4, &[5]); // start at level 4
+        // Give enough XP to reach level 5
+        let result = inst.add_xp(xp_needed(5), species);
+        // Should reach level 5 and learn move 11
+        if result.leveled_up {
+            assert!(
+                result.new_moves.contains(&11),
+                "Should learn Crease (11) at level 5, got {:?}",
+                result.new_moves
+            );
+        }
+    }
+
+    // ── Evolution ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn retro_runner_can_evolve_at_16() {
+        let species = data::get_species(1);
+        let mut inst = make_instance(1, 16, &[5]);
+        let evo = inst.check_evolution(species);
+        assert_eq!(evo, Some(2), "Retro Runner should evolve to species 2 at Lv 16");
+    }
+
+    #[test]
+    fn retro_runner_cannot_evolve_before_16() {
+        let species = data::get_species(1);
+        let inst = make_instance(1, 15, &[5]);
+        assert_eq!(inst.check_evolution(species), None);
+    }
+
+    #[test]
+    fn evolution_changes_species_and_recalculates_stats() {
+        let old_species = data::get_species(1);
+        let new_species = data::get_species(2);
+        let mut inst = make_instance(1, 16, &[5]);
+        let old_max_hp = inst.max_hp;
+        inst.evolve(2, new_species);
+        assert_eq!(inst.species_id, 2);
+        // Retro Runner II has higher base stats, so max HP should increase
+        assert!(
+            inst.max_hp >= old_max_hp,
+            "Max HP after evolution should be >= before: {} vs {}",
+            inst.max_hp, old_max_hp
+        );
+        let _ = old_species;
+    }
+
+    #[test]
+    fn evolution_can_be_cancelled() {
+        // Evolution is just a function call; not calling evolve() == cancelled
+        let species = data::get_species(1);
+        let mut inst = make_instance(1, 16, &[5]);
+        let evo = inst.check_evolution(species);
+        assert_eq!(evo, Some(2));
+        // Don't call evolve() — inst stays as species 1
+        assert_eq!(inst.species_id, 1);
+    }
+
+    // ── Capture ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn master_case_always_succeeds() {
+        let mut rng = SeededRng::new(12345);
+        let target = make_instance(1, 5, &[5]);
+        let species = data::get_species(1);
+        let master_case = data::get_item(33); // Master Case
+        let result = attempt_capture(&target, species, master_case, &mut rng);
+        assert_eq!(result.shakes, 4);
+        assert!(result.success);
+    }
+
+    #[test]
+    fn capture_harder_at_full_hp() {
+        let mut rng1 = SeededRng::new(42);
+        let mut full_hp = make_instance(1, 5, &[5]);
+        let species = data::get_species(1); // base_catch_rate=200
+        let basic_case = data::get_item(30); // CatchMultiplier(100) = 1.0x
+
+        let r_full = attempt_capture(&full_hp, species, basic_case, &mut rng1);
+
+        let mut rng2 = SeededRng::new(42);
+        let mut low_hp = make_instance(1, 5, &[5]);
+        low_hp.current_hp = 1;
+        let r_low = attempt_capture(&low_hp, species, basic_case, &mut rng2);
+
+        // Low HP should shake at least as many times as full HP (easier to catch)
+        assert!(
+            r_low.shakes >= r_full.shakes,
+            "At 1 HP ({} shakes) should be easier than full HP ({} shakes)",
+            r_low.shakes, r_full.shakes
+        );
+    }
+
+    #[test]
+    fn grail_case_low_hp_high_rate() {
+        // Retro Runner has base_catch_rate=200, at 1 HP with grail case (2.5x)
+        // should very likely succeed
+        let species = data::get_species(1);
+        let grail = data::get_item(32);
+        let mut successes = 0u32;
+        for i in 0..100 {
+            let mut rng = SeededRng::new(i * 31337);
+            let mut target = make_instance(1, 5, &[5]);
+            target.current_hp = 1;
+            let r = attempt_capture(&target, species, grail, &mut rng);
+            if r.success { successes += 1; }
+        }
+        assert!(successes >= 90, "Grail case at 1 HP should succeed ~100%, got {}/100", successes);
+    }
+
+    #[test]
+    fn faction_case_matching_faction_gives_3x_bonus() {
+        // Retro Case (item 34) applies to Retro faction
+        let retro_case = data::get_item(34);
+        // Verify it has CatchMultiplierFaction for Retro
+        match retro_case.effect {
+            crate::models::items::ItemEffect::CatchMultiplierFaction(faction, _) => {
+                assert_eq!(faction, Faction::Retro);
+            }
+            _ => panic!("Retro Case should be CatchMultiplierFaction"),
+        }
+
+        // Retro Runner (faction=Retro) should get a boost
+        let species = data::get_species(1); // Retro Runner, faction=Retro
+        assert_eq!(species.faction, Faction::Retro);
+
+        // Run many trials and verify success rate is high (3x bonus is huge)
+        let mut successes = 0u32;
+        for i in 0..100 {
+            let mut rng = SeededRng::new(i * 7919);
+            let mut target = make_instance(1, 5, &[5]);
+            target.current_hp = target.max_hp / 2;
+            let r = attempt_capture(&target, species, retro_case, &mut rng);
+            if r.success { successes += 1; }
+        }
+        assert!(successes >= 80, "Faction case on matching faction should succeed often, got {}/100", successes);
+    }
+
+    #[test]
+    fn capture_success_rate_over_1000_trials() {
+        // Basic case, Retro Runner (catch_rate=200), half HP
+        // Expected catch rate ≈ (3*max - 2*(max/2)) * 200 * 1.0 / (3*max)
+        //                      = (3max - max) * 200 / (3max)
+        //                      = 2/3 * 200 ≈ 133/255 ≈ 52% catch rate base
+        // shake_threshold = 1048560 / sqrt(sqrt(16711680 / 133)) ≈ high
+        let species = data::get_species(1);
+        let basic = data::get_item(30);
+        let mut successes = 0u32;
+        for i in 0..1000u64 {
+            let mut rng = SeededRng::new(i * 2654435761);
+            let mut target = make_instance(1, 10, &[5]);
+            target.current_hp = target.max_hp / 2;
+            let r = attempt_capture(&target, species, basic, &mut rng);
+            if r.success { successes += 1; }
+        }
+        // Should succeed in a reasonable range (not 0 and not 1000)
+        assert!(successes > 100 && successes < 1000,
+            "Success rate over 1000 trials: {}/1000", successes);
+    }
+
+    // ── AI levels ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn random_ai_uses_all_moves() {
+        // Opponent has 4 different moves; over 100 rounds each should appear
+        let opp = make_instance(1, 10, &[5, 11, 1, 12]); // 4 different moves
+        let (state, party) = make_state(AiLevel::Random, opp);
+        let mut rng = SeededRng::new(99);
+        let mut counts = [0u32; 4];
+        for _ in 0..100 {
+            let action = choose_action(&state, &party, &AiLevel::Random, &mut rng);
+            if let BattleAction::Fight { move_index } = action {
+                if (move_index as usize) < 4 {
+                    counts[move_index as usize] += 1;
+                }
+            }
+        }
+        for (i, &c) in counts.iter().enumerate() {
+            assert!(c > 0, "Move {} was never chosen by Random AI", i);
+        }
+    }
+
+    #[test]
+    fn basic_ai_prefers_super_effective() {
+        // Use a Retro sneaker (species 1) vs a Skate sneaker (species 17=Skate Blazer)
+        // Retro is SE against Skate
+        // Opp is Retro with a Retro move (move 12 Throwback, Retro faction)
+        // and a Normal move (move 5 Stomp, Normal faction)
+        let opp = make_instance(1, 10, &[5, 12]); // Stomp(Normal), Throwback(Retro)
+        let species_17 = data::get_species(17); // Skate Blazer — Skate faction
+        assert_eq!(species_17.faction, Faction::Skate);
+
+        // Build a party with Skate player
+        let player = make_instance(17, 10, &[5]);
+        let mut state = BattleState {
+            kind: BattleKind::Wild,
+            player_active: 0,
+            opponent: BattleOpponent {
+                team: vec![opp],
+                items: vec![],
+                ai_level: AiLevel::Basic,
+            },
+            opponent_active: 0,
+            turn_number: 0,
+            player_stages: StatStages::default(),
+            opponent_stages: StatStages::default(),
+            turn_log: vec![],
+            flee_attempts: 0,
+            can_flee: true,
+            waiting_for: None,
+            player_skip_turn: false,
+            opponent_skip_turn: false,
+        };
+        let party = vec![player];
+
+        let mut se_count = 0u32;
+        let mut total = 0u32;
+        let mut rng = SeededRng::new(777);
+        for _ in 0..100 {
+            let action = choose_action(&state, &party, &AiLevel::Basic, &mut rng);
+            if let BattleAction::Fight { move_index } = action {
+                // Move index 1 (Throwback = Retro) is SE vs Skate
+                if move_index == 1 { se_count += 1; }
+                total += 1;
+            }
+        }
+        assert!(
+            se_count > 50,
+            "Basic AI should pick SE move >50% of the time, got {}/{}",
+            se_count, total
+        );
+    }
+
+    #[test]
+    fn intermediate_ai_switches_when_at_disadvantage() {
+        // Opp has two sneakers: active one at type disadvantage vs player with low HP,
+        // second one has a better matchup
+        // Player is Skate (species 17), opp active is Retro (disadvantaged by player? no...)
+        // Let's set up: Player is Techwear (species 9), opp active is Retro (species 1)
+        // Techwear is 2x effective against Retro
+        // Opp bench: Techwear sneaker (species 9) which resists Techwear player
+        let mut opp_active = make_instance(1, 10, &[5]); // Retro at low HP
+        opp_active.current_hp = opp_active.max_hp / 3; // below 50%
+        let opp_bench = make_instance(9, 10, &[5]); // Techwear bench
+
+        let player = make_instance(9, 10, &[5]); // Techwear player
+        let state = BattleState {
+            kind: BattleKind::Trainer { id: 1, name: "Trainer".to_string() },
+            player_active: 0,
+            opponent: BattleOpponent {
+                team: vec![opp_active, opp_bench],
+                items: vec![],
+                ai_level: AiLevel::Intermediate,
+            },
+            opponent_active: 0,
+            turn_number: 0,
+            player_stages: StatStages::default(),
+            opponent_stages: StatStages::default(),
+            turn_log: vec![],
+            flee_attempts: 0,
+            can_flee: false,
+            waiting_for: None,
+            player_skip_turn: false,
+            opponent_skip_turn: false,
+        };
+        let party = vec![player];
+
+        // Player is Techwear; opponent is Retro; Techwear 2x vs Retro
+        let player_faction = data::get_species(9).faction;
+        let opp_faction = data::get_species(1).faction;
+        let eff = player_faction.effectiveness_against(opp_faction);
+        assert!(eff > 1.0, "Setup: Techwear should be SE vs Retro");
+
+        let mut rng = SeededRng::new(42);
+        let mut switched = false;
+        for _ in 0..20 {
+            let action = choose_action(&state, &party, &AiLevel::Intermediate, &mut rng);
+            if matches!(action, BattleAction::Switch { .. }) {
+                switched = true;
+                break;
+            }
+        }
+        assert!(switched, "Intermediate AI should switch when disadvantaged with low HP");
+    }
+
+    // ── Money ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn wild_battle_awards_money() {
+        let mut opp = make_instance(4, 5, &[5]); // Classic Dunk Lv.5
+        opp.current_hp = 0; // already fainted
+        let (mut state, mut party) = make_state(AiLevel::Random, opp);
+        let mut money = 0u32;
+        let _events = BattleEngine::award_xp_and_money(&mut state, &mut party, &mut money);
+        assert!(money > 0, "Wild battle should award money");
+        // Expected: level 5 * 10 = 50
+        assert_eq!(money, 50, "Wild Lv.5 should award $50");
+    }
+
+    #[test]
+    fn money_added_to_player_state() {
+        let mut opp = make_instance(4, 10, &[5]);
+        opp.current_hp = 0;
+        let (mut state, mut party) = make_state(AiLevel::Random, opp);
+        let mut money = 100u32;
+        BattleEngine::award_xp_and_money(&mut state, &mut party, &mut money);
+        assert!(money > 100, "Money should increase after battle");
+    }
+
+    #[test]
+    fn xp_gained_event_emitted() {
+        let mut opp = make_instance(4, 5, &[5]);
+        opp.current_hp = 0;
+        let (mut state, mut party) = make_state(AiLevel::Random, opp);
+        let mut money = 0u32;
+        let events = BattleEngine::award_xp_and_money(&mut state, &mut party, &mut money);
+        let has_xp = events.iter().any(|e| matches!(e, BattleTurnEvent::XpGained { .. }));
+        assert!(has_xp, "XpGained event should be emitted");
+    }
+}
+

@@ -16,7 +16,8 @@ use state::player::Direction;
 use world::map::MapData;
 use world::movement::{parse_input, process_movement, GameEvent};
 use world::encounters::generate_wild_sneaker;
-use battle::{BattleEngine, BattleState, BattleAction, BattleTurnEvent};
+use battle::{BattleEngine, BattleState, BattleAction, BattleTurnEvent, BattleResult};
+use battle::types::{BattlePrompt};
 
 // ── Tile types ──
 
@@ -217,7 +218,7 @@ impl GameEngine {
             }
         };
 
-        let events = if let Some(battle) = self.battle.as_mut() {
+        let mut events = if let Some(battle) = self.battle.as_mut() {
             BattleEngine::submit_action(
                 battle,
                 &mut self.state.player.party,
@@ -228,11 +229,143 @@ impl GameEngine {
             return "[]".to_string();
         };
 
-        // If battle ended, return to overworld
+        // Check for PlayerWin — award XP and money
+        let player_won = events
+            .iter()
+            .any(|e| matches!(e, BattleTurnEvent::BattleEnd { result: BattleResult::PlayerWin }));
+        if player_won {
+            if let Some(battle) = self.battle.as_mut() {
+                let xp_events = BattleEngine::award_xp_and_money(
+                    battle,
+                    &mut self.state.player.party,
+                    &mut self.state.player.money,
+                );
+                events.extend(xp_events);
+            }
+        }
+
+        // Check for PlayerCapture — add captured sneaker to party or box
+        let player_captured = events
+            .iter()
+            .any(|e| matches!(e, BattleTurnEvent::BattleEnd { result: BattleResult::PlayerCapture }));
+        if player_captured {
+            if let Some(battle) = &self.battle {
+                let opp_idx = battle.opponent_active;
+                let captured = battle.opponent.team[opp_idx].clone();
+                let species_id = captured.species_id;
+                if self.state.player.party.len() < 6 {
+                    self.state.player.party.push(captured);
+                } else {
+                    self.state.player.sneaker_box.deposit(captured);
+                }
+                // Update dex
+                if (species_id as usize) <= self.state.player.sneakerdex.entries.len() {
+                    let idx = (species_id as usize).saturating_sub(1);
+                    self.state.player.sneakerdex.entries[idx].seen = true;
+                    self.state.player.sneakerdex.entries[idx].caught = true;
+                }
+            }
+        }
+
+        // If battle ended with no pending prompts, return to overworld
         let battle_ended = events
             .iter()
             .any(|e| matches!(e, BattleTurnEvent::BattleEnd { .. }));
-        if battle_ended {
+        let has_waiting = self.battle.as_ref().map(|b| b.waiting_for.is_some()).unwrap_or(false);
+        if battle_ended && !has_waiting {
+            self.battle = None;
+            self.state.mode = GameMode::Overworld;
+        }
+
+        serde_json::to_string(&events).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    /// Respond to a move-learn prompt. slot 0-3 replaces that slot, slot 4 skips.
+    /// Returns remaining events as JSON.
+    pub fn battle_learn_move(&mut self, slot: u8) -> String {
+        let battle = match self.battle.as_mut() {
+            Some(b) => b,
+            None => return "[]".to_string(),
+        };
+
+        let move_id = match &battle.waiting_for {
+            Some(BattlePrompt::MoveLearn { move_id }) => *move_id,
+            _ => return "[]".to_string(),
+        };
+
+        battle.waiting_for = None;
+
+        let mut events = Vec::new();
+
+        if slot < 4 {
+            // Replace the move at slot
+            let active_idx = battle.player_active;
+            if let Some(sneaker) = self.state.player.party.get_mut(active_idx) {
+                let md = data::get_move(move_id);
+                sneaker.moves[slot as usize] = Some(crate::models::moves::MoveSlot {
+                    move_id,
+                    current_pp: md.pp,
+                    max_pp: md.pp,
+                });
+            }
+        }
+        // slot == 4 means skip (don't learn)
+
+        // Check if battle is actually over now
+        let battle_over_without_prompts = battle.turn_log
+            .iter()
+            .any(|e| matches!(e, BattleTurnEvent::BattleEnd { result: BattleResult::PlayerWin }))
+            && battle.waiting_for.is_none();
+
+        if battle_over_without_prompts {
+            events.push(BattleTurnEvent::BattleEnd { result: BattleResult::PlayerWin });
+            self.battle = None;
+            self.state.mode = GameMode::Overworld;
+        }
+
+        serde_json::to_string(&events).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    /// Respond to an evolution prompt. accept=true to evolve, false to cancel.
+    /// Returns remaining events as JSON.
+    pub fn battle_evolution_choice(&mut self, accept: bool) -> String {
+        let battle = match self.battle.as_mut() {
+            Some(b) => b,
+            None => return "[]".to_string(),
+        };
+
+        let target_species_id = match &battle.waiting_for {
+            Some(BattlePrompt::Evolution { species_id }) => *species_id,
+            _ => return "[]".to_string(),
+        };
+
+        battle.waiting_for = None;
+
+        let mut events = Vec::new();
+
+        if accept {
+            let active_idx = battle.player_active;
+            if let Some(sneaker) = self.state.player.party.get_mut(active_idx) {
+                let new_species = data::get_species(target_species_id);
+                sneaker.evolve(target_species_id, new_species);
+                events.push(BattleTurnEvent::Message {
+                    text: format!("Evolved into {}!", new_species.name),
+                });
+            }
+        } else {
+            events.push(BattleTurnEvent::Message {
+                text: "Evolution cancelled.".to_string(),
+            });
+        }
+
+        // Check if battle is actually over now
+        let battle_over_without_prompts = battle.turn_log
+            .iter()
+            .any(|e| matches!(e, BattleTurnEvent::BattleEnd { result: BattleResult::PlayerWin }))
+            && battle.waiting_for.is_none();
+
+        if battle_over_without_prompts {
+            events.push(BattleTurnEvent::BattleEnd { result: BattleResult::PlayerWin });
             self.battle = None;
             self.state.mode = GameMode::Overworld;
         }
