@@ -2,13 +2,14 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useWasm } from './hooks/useWasm'
 import { useInput } from './hooks/useInput'
 import { useGameLoop } from './hooks/useGameLoop'
-
-const TILE_SIZE = 48 // 16px tiles at 3x scale
-const TILE_COLORS: Record<number, string> = {
-  0: '#3a5a40', // floor — dark green
-  1: '#4a4a5a', // wall — grey
-  2: '#5a7a3a', // tall grass — lighter green
-}
+import {
+  calculateCamera,
+  getVisibleTileRange,
+  CANVAS_WIDTH,
+  CANVAS_HEIGHT,
+  TILE_PX,
+} from './rendering/camera'
+import { renderTiles } from './rendering/tileRenderer'
 
 function App() {
   const { engine, ready, error } = useWasm()
@@ -25,44 +26,26 @@ function App() {
     const ctx = canvas.getContext('2d')
     if (!ctx) return
 
-    const w = eng.map_width()
-    const h = eng.map_height()
-
-    canvas.width = w * TILE_SIZE
-    canvas.height = h * TILE_SIZE
-
-    // Draw tiles
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        const tile = eng.get_tile(x, y)
-        ctx.fillStyle = TILE_COLORS[tile] ?? '#000'
-        ctx.fillRect(x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE)
-
-        // Grid lines
-        ctx.strokeStyle = 'rgba(0,0,0,0.15)'
-        ctx.strokeRect(x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE)
-      }
-    }
-
-    // Draw player
+    const mapW = eng.map_width()
+    const mapH = eng.map_height()
     const px = eng.player_x()
     const py = eng.player_y()
+
+    // Calculate camera centered on player, clamped to map edges
+    const camera = calculateCamera(px, py, mapW, mapH)
+    const tileRange = getVisibleTileRange(camera)
+
+    // Draw visible tiles only
+    renderTiles(ctx, eng, camera, tileRange)
+
+    // Draw player relative to camera
+    const playerDrawX = px * TILE_PX - camera.x
+    const playerDrawY = py * TILE_PX - camera.y
     ctx.fillStyle = '#ff6b6b'
-    ctx.fillRect(
-      px * TILE_SIZE + 6,
-      py * TILE_SIZE + 6,
-      TILE_SIZE - 12,
-      TILE_SIZE - 12,
-    )
-    // Player outline
+    ctx.fillRect(playerDrawX + 6, playerDrawY + 6, TILE_PX - 12, TILE_PX - 12)
     ctx.strokeStyle = '#fff'
     ctx.lineWidth = 2
-    ctx.strokeRect(
-      px * TILE_SIZE + 6,
-      py * TILE_SIZE + 6,
-      TILE_SIZE - 12,
-      TILE_SIZE - 12,
-    )
+    ctx.strokeRect(playerDrawX + 6, playerDrawY + 6, TILE_PX - 12, TILE_PX - 12)
   }, [engine])
 
   // Game tick
@@ -108,9 +91,13 @@ function App() {
 
       <canvas
         ref={canvasRef}
+        width={CANVAS_WIDTH}
+        height={CANVAS_HEIGHT}
         style={{
           border: '2px solid #333',
           imageRendering: 'pixelated',
+          width: CANVAS_WIDTH,
+          height: CANVAS_HEIGHT,
         }}
       />
 
