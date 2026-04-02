@@ -13,28 +13,9 @@ import {
 } from './rendering/camera'
 import { renderTiles } from './rendering/tileRenderer'
 import { generateCharSheet, getCharSrc, CHAR_W, CHAR_H } from './rendering/sprites'
+import { BattleScreen } from './components/battle/BattleScreen'
 
 type Facing = 'up' | 'down' | 'left' | 'right'
-
-interface BattleMoveInfo {
-  name: string
-  pp: number
-  max_pp: number
-  faction: string
-}
-
-interface BattleSneakerInfo {
-  name: string
-  level: number
-  current_hp: number
-  max_hp: number
-  moves?: BattleMoveInfo[]
-}
-
-interface BattleStateUI {
-  player: BattleSneakerInfo
-  opponent: BattleSneakerInfo
-}
 
 let charSheet: HTMLCanvasElement | null = null
 
@@ -45,9 +26,6 @@ function App() {
   const [encounter, setEncounter] = useState(false)
   const [stepCount, setStepCount] = useState(0)
   const [gameMode, setGameMode] = useState<string>('Overworld')
-  const [battleState, setBattleState] = useState<BattleStateUI | null>(null)
-  const [battleLog, setBattleLog] = useState<string[]>([])
-  const battleLogRef = useRef<HTMLDivElement>(null)
 
   const render = useCallback((
     px: number, py: number,
@@ -90,13 +68,6 @@ function App() {
     )
   }, [engine])
 
-  // Scroll battle log to bottom when it updates
-  useEffect(() => {
-    if (battleLogRef.current) {
-      battleLogRef.current.scrollTop = battleLogRef.current.scrollHeight
-    }
-  }, [battleLog])
-
   // Game loop: 60fps, passes dt to engine
   useGameLoop(
     useCallback((dt: number) => {
@@ -107,15 +78,7 @@ function App() {
       setGameMode(mode)
 
       if (mode === 'Battle') {
-        // Refresh battle state each frame
-        try {
-          const bsJson = eng.get_battle_state()
-          if (bsJson && bsJson !== '{}') {
-            const bs = JSON.parse(bsJson) as BattleStateUI
-            setBattleState(bs)
-          }
-        } catch { /* ignore parse errors */ }
-        // Still tick so time advances
+        // Just tick time — BattleScreen manages its own state
         eng.tick(dt, 'none')
         return
       }
@@ -160,58 +123,6 @@ function App() {
     }
   }, [ready, render, engine])
 
-  // Submit a battle action
-  const submitBattleAction = useCallback((actionJson: string) => {
-    const eng = engine.current
-    if (!eng) return
-    try {
-      const eventsJson = eng.battle_action(actionJson)
-      const events = JSON.parse(eventsJson) as Array<Record<string, unknown>>
-      const logLines: string[] = []
-      for (const ev of events) {
-        const key = Object.keys(ev)[0]
-        const val = ev[key] as Record<string, unknown>
-        if (key === 'MoveUsed') {
-          logLines.push(`[${val.side}] used move #${val.move_id}`)
-        } else if (key === 'Damage') {
-          const eff = val.effectiveness as string
-          const crit = val.is_critical ? ' CRITICAL HIT!' : ''
-          logLines.push(`[${val.side}] took ${val.amount} dmg (${eff})${crit}`)
-        } else if (key === 'Fainted') {
-          logLines.push(`[${val.side}] fainted!`)
-        } else if (key === 'BattleEnd') {
-          const result = (val.result as string)
-          logLines.push(`Battle ended: ${result}`)
-          setGameMode('Overworld')
-          setBattleState(null)
-          setBattleLog([])
-        } else if (key === 'FleeAttempt') {
-          logLines.push(val.success ? 'Escaped!' : 'Can\'t escape!')
-        } else if (key === 'Message') {
-          logLines.push(val.text as string)
-        }
-      }
-      setBattleLog(prev => [...prev, ...logLines])
-    } catch { /* ignore */ }
-  }, [engine])
-
-  // Battle keyboard input
-  useEffect(() => {
-    if (gameMode !== 'Battle') return
-    const handler = (e: KeyboardEvent) => {
-      if (e.repeat) return
-      switch (e.code) {
-        case 'Digit1': submitBattleAction('{"type":"fight","move_index":0}'); break
-        case 'Digit2': submitBattleAction('{"type":"fight","move_index":1}'); break
-        case 'Digit3': submitBattleAction('{"type":"fight","move_index":2}'); break
-        case 'Digit4': submitBattleAction('{"type":"fight","move_index":3}'); break
-        case 'KeyR':   submitBattleAction('{"type":"run"}'); break
-      }
-    }
-    window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
-  }, [gameMode, submitBattleAction])
-
   if (error) {
     return <div style={{ color: '#ff6b6b', padding: 40 }}>WASM Error: {error}</div>
   }
@@ -220,136 +131,33 @@ function App() {
     return <div style={{ padding: 40 }}>Loading engine...</div>
   }
 
-  // ── Battle overlay ──────────────────────────────────────────────────────────
-  if (gameMode === 'Battle' && battleState) {
-    const { player, opponent } = battleState
-    const moves = player.moves ?? []
-
+  // ── Battle screen ────────────────────────────────────────────────────────────
+  if (gameMode === 'Battle') {
+    const eng = engine.current
+    if (!eng) return null
     return (
-      <div style={{ fontFamily: 'monospace', padding: 16, maxWidth: 600 }}>
-        <h2 style={{ color: '#ffd700', margin: '0 0 12px' }}>⚔ BATTLE</h2>
-
-        {/* HP displays */}
-        <div style={{ display: 'flex', gap: 16, marginBottom: 12 }}>
-          <div style={{
-            flex: 1, border: '1px solid #555', padding: 10,
-            background: '#1a1a2e', borderRadius: 4,
-          }}>
-            <div style={{ fontSize: 11, opacity: 0.7, marginBottom: 4 }}>WILD</div>
-            <div style={{ fontWeight: 'bold', marginBottom: 2 }}>
-              {opponent.name} Lv.{opponent.level}
-            </div>
-            <div style={{ color: opponent.current_hp > opponent.max_hp * 0.5 ? '#4caf50' : opponent.current_hp > opponent.max_hp * 0.2 ? '#ff9800' : '#f44336' }}>
-              HP: {opponent.current_hp}/{opponent.max_hp}
-            </div>
-            <div style={{ height: 6, background: '#333', borderRadius: 3, marginTop: 4 }}>
-              <div style={{
-                height: '100%',
-                width: `${Math.max(0, (opponent.current_hp / opponent.max_hp) * 100)}%`,
-                background: opponent.current_hp > opponent.max_hp * 0.5 ? '#4caf50' : opponent.current_hp > opponent.max_hp * 0.2 ? '#ff9800' : '#f44336',
-                borderRadius: 3,
-                transition: 'width 0.3s',
-              }} />
-            </div>
-          </div>
-
-          <div style={{
-            flex: 1, border: '1px solid #555', padding: 10,
-            background: '#1a2e1a', borderRadius: 4,
-          }}>
-            <div style={{ fontSize: 11, opacity: 0.7, marginBottom: 4 }}>YOUR</div>
-            <div style={{ fontWeight: 'bold', marginBottom: 2 }}>
-              {player.name} Lv.{player.level}
-            </div>
-            <div style={{ color: player.current_hp > player.max_hp * 0.5 ? '#4caf50' : player.current_hp > player.max_hp * 0.2 ? '#ff9800' : '#f44336' }}>
-              HP: {player.current_hp}/{player.max_hp}
-            </div>
-            <div style={{ height: 6, background: '#333', borderRadius: 3, marginTop: 4 }}>
-              <div style={{
-                height: '100%',
-                width: `${Math.max(0, (player.current_hp / player.max_hp) * 100)}%`,
-                background: player.current_hp > player.max_hp * 0.5 ? '#4caf50' : player.current_hp > player.max_hp * 0.2 ? '#ff9800' : '#f44336',
-                borderRadius: 3,
-                transition: 'width 0.3s',
-              }} />
-            </div>
-          </div>
-        </div>
-
-        {/* Move buttons */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 8 }}>
-          {moves.map((mv, i) => (
-            <button
-              key={i}
-              onClick={() => submitBattleAction(`{"type":"fight","move_index":${i}}`)}
-              disabled={mv.pp === 0}
-              style={{
-                padding: '8px 12px',
-                background: mv.pp === 0 ? '#333' : '#2a2a4a',
-                color: mv.pp === 0 ? '#555' : '#e0e0e0',
-                border: '1px solid #555',
-                borderRadius: 4,
-                cursor: mv.pp === 0 ? 'not-allowed' : 'pointer',
-                textAlign: 'left',
-                fontSize: 13,
-              }}
-            >
-              <div style={{ fontWeight: 'bold' }}>[{i + 1}] {mv.name}</div>
-              <div style={{ fontSize: 11, opacity: 0.7 }}>{mv.faction} · PP {mv.pp}/{mv.max_pp}</div>
-            </button>
-          ))}
-          {/* Fill empty move slots */}
-          {Array.from({ length: Math.max(0, 4 - moves.length) }).map((_, i) => (
-            <div key={`empty-${i}`} style={{
-              padding: '8px 12px',
-              background: '#1a1a1a',
-              border: '1px solid #333',
-              borderRadius: 4,
-              color: '#444',
-              fontSize: 13,
-            }}>
-              —
-            </div>
-          ))}
-        </div>
-
-        {/* Run button */}
-        <button
-          onClick={() => submitBattleAction('{"type":"run"}')}
-          style={{
-            width: '100%', padding: '8px 12px', marginBottom: 8,
-            background: '#3a2a2a', color: '#ff9999', border: '1px solid #844',
-            borderRadius: 4, cursor: 'pointer', fontSize: 13,
+      <div
+        style={{
+          minHeight: '100vh',
+          background: '#0a0a0a',
+          display: 'flex',
+          alignItems: 'flex-start',
+          justifyContent: 'center',
+          padding: 24,
+        }}
+      >
+        {/* Encounter transition flash */}
+        <BattleScreen
+          engine={eng}
+          onBattleEnd={() => {
+            setGameMode('Overworld')
           }}
-        >
-          [R] Run
-        </button>
-
-        {/* Battle log */}
-        <div
-          ref={battleLogRef}
-          style={{
-            border: '1px solid #333', padding: 8, height: 120,
-            overflowY: 'auto', background: '#0a0a0a',
-            fontSize: 12, lineHeight: 1.5,
-          }}
-        >
-          {battleLog.length === 0 && (
-            <div style={{ opacity: 0.5 }}>A wild {opponent.name} appeared!</div>
-          )}
-          {battleLog.map((line, i) => (
-            <div key={i} style={{ opacity: 0.9 }}>{line}</div>
-          ))}
-        </div>
-
-        <div style={{ marginTop: 8, fontSize: 11, opacity: 0.5 }}>
-          Keys: 1-4 = Move, R = Run
-        </div>
+        />
       </div>
     )
   }
 
-  // ── Overworld ───────────────────────────────────────────────────────────────
+  // ── Overworld ────────────────────────────────────────────────────────────────
   return (
     <div>
       <h1 style={{ fontSize: 24, marginBottom: 8, color: '#ff6b6b' }}>
@@ -376,13 +184,14 @@ function App() {
           style={{
             position: 'fixed',
             top: 0, left: 0, right: 0, bottom: 0,
-            background: 'rgba(0,0,0,0.8)',
+            background: 'rgba(255,255,255,0.9)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
             fontSize: 32,
-            color: '#ffd700',
+            color: '#1a1a1a',
             zIndex: 10,
+            animation: 'encounterFlash 1.5s ease-out forwards',
           }}
         >
           Wild Sneaker Encountered!
@@ -392,6 +201,14 @@ function App() {
       <div style={{ marginTop: 8, fontSize: 11, opacity: 0.4 }}>
         Steps: {stepCount}
       </div>
+
+      <style>{`
+        @keyframes encounterFlash {
+          0%   { opacity: 1; }
+          60%  { opacity: 0.9; }
+          100% { opacity: 0; }
+        }
+      `}</style>
     </div>
   )
 }

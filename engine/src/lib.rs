@@ -16,8 +16,9 @@ use state::player::Direction;
 use world::map::MapData;
 use world::movement::{parse_input, process_movement, GameEvent};
 use world::encounters::generate_wild_sneaker;
-use battle::{BattleEngine, BattleState, BattleAction, BattleTurnEvent, BattleResult};
+use battle::{BattleEngine, BattleState, BattleAction, BattleTurnEvent, BattleResult, BattleKind};
 use battle::types::{BattlePrompt};
+use models::sneaker::xp_needed;
 
 // ── Tile types ──
 
@@ -374,7 +375,7 @@ impl GameEngine {
     }
 
     /// Get current battle state as JSON for the UI.
-    /// Returns JSON with player and opponent sneaker summaries.
+    /// Returns full BattleRenderState with sneaker summaries, stages, moves, and metadata.
     pub fn get_battle_state(&self) -> String {
         let battle = match &self.battle {
             Some(b) => b,
@@ -391,38 +392,181 @@ impl GameEngine {
         let opp_sneaker = &battle.opponent.team[battle.opponent_active];
         let opp_species = data::get_species(opp_sneaker.species_id);
 
-        let player_moves: Vec<serde_json::Value> = player_sneaker
+        // Compute XP progress for player sneaker
+        let xp_current_level = xp_needed(player_sneaker.level);
+        let xp_next_level = xp_needed(player_sneaker.level.saturating_add(1));
+
+        // Available moves with full detail
+        let available_moves: Vec<serde_json::Value> = player_sneaker
             .moves
             .iter()
             .filter_map(|slot| {
                 slot.as_ref().map(|s| {
                     let md = data::get_move(s.move_id);
                     serde_json::json!({
+                        "id": md.id,
                         "name": md.name,
-                        "pp": s.current_pp,
+                        "faction": format!("{:?}", md.faction),
+                        "category": format!("{:?}", md.category),
+                        "power": md.power.unwrap_or(0),
+                        "accuracy": md.accuracy,
+                        "current_pp": s.current_pp,
                         "max_pp": s.max_pp,
+                    })
+                })
+            })
+            .collect();
+
+        // Opponent moves (for move name lookup during animations)
+        let opponent_moves: Vec<serde_json::Value> = opp_sneaker
+            .moves
+            .iter()
+            .filter_map(|slot| {
+                slot.as_ref().map(|s| {
+                    let md = data::get_move(s.move_id);
+                    serde_json::json!({
+                        "id": md.id,
+                        "name": md.name,
                         "faction": format!("{:?}", md.faction),
                     })
                 })
             })
             .collect();
 
+        let player_status = player_sneaker.status.as_ref().map(|s| format!("{:?}", s.status_type()));
+        let opp_status = opp_sneaker.status.as_ref().map(|s| format!("{:?}", s.status_type()));
+
+        let is_wild = matches!(battle.kind, BattleKind::Wild);
+
+        let waiting_for = battle.waiting_for.as_ref().map(|p| match p {
+            BattlePrompt::MoveLearn { move_id } => serde_json::json!({ "type": "MoveLearn", "move_id": move_id }),
+            BattlePrompt::Evolution { species_id } => serde_json::json!({ "type": "Evolution", "species_id": species_id }),
+        });
+
         serde_json::json!({
-            "player": {
+            "player_sneaker": {
+                "uid": player_sneaker.uid,
+                "species_id": player_sneaker.species_id,
                 "name": player_sneaker.display_name(player_species),
                 "level": player_sneaker.level,
                 "current_hp": player_sneaker.current_hp,
                 "max_hp": player_sneaker.max_hp,
-                "moves": player_moves,
+                "faction": format!("{:?}", player_species.faction),
+                "rarity_tier": format!("{:?}", player_species.rarity_tier),
+                "status": player_status,
+                "current_xp": player_sneaker.xp,
+                "xp_current_level": xp_current_level,
+                "xp_next_level": xp_next_level,
             },
-            "opponent": {
+            "opponent_sneaker": {
+                "uid": opp_sneaker.uid,
+                "species_id": opp_sneaker.species_id,
                 "name": opp_sneaker.display_name(opp_species),
                 "level": opp_sneaker.level,
                 "current_hp": opp_sneaker.current_hp,
                 "max_hp": opp_sneaker.max_hp,
+                "faction": format!("{:?}", opp_species.faction),
+                "rarity_tier": format!("{:?}", opp_species.rarity_tier),
+                "status": opp_status,
             },
+            "player_stages": {
+                "hype": battle.player_stages.hype,
+                "comfort": battle.player_stages.comfort,
+                "drip": battle.player_stages.drip,
+                "rarity": battle.player_stages.rarity,
+            },
+            "opponent_stages": {
+                "hype": battle.opponent_stages.hype,
+                "comfort": battle.opponent_stages.comfort,
+                "drip": battle.opponent_stages.drip,
+                "rarity": battle.opponent_stages.rarity,
+            },
+            "available_moves": available_moves,
+            "opponent_moves": opponent_moves,
+            "can_flee": battle.can_flee,
+            "is_wild": is_wild,
+            "waiting_for": waiting_for,
         })
         .to_string()
+    }
+
+    /// Get bag items as JSON for the BagScreen UI.
+    /// is_wild: if true, include sneaker cases.
+    pub fn get_bag_items(&self, is_wild: bool) -> String {
+        let bag = &self.state.player.bag;
+
+        let mut heal: Vec<serde_json::Value> = bag.heal_items.iter().map(|(id, qty)| {
+            let item = data::get_item(*id);
+            serde_json::json!({
+                "id": id,
+                "name": item.name,
+                "qty": qty,
+                "description": item.description,
+                "category": format!("{:?}", item.category),
+            })
+        }).collect();
+
+        let mut battle_items: Vec<serde_json::Value> = bag.battle_items.iter().map(|(id, qty)| {
+            let item = data::get_item(*id);
+            serde_json::json!({
+                "id": id,
+                "name": item.name,
+                "qty": qty,
+                "description": item.description,
+                "category": format!("{:?}", item.category),
+            })
+        }).collect();
+
+        let mut cases: Vec<serde_json::Value> = Vec::new();
+        if is_wild {
+            cases = bag.sneaker_cases.iter().map(|(id, qty)| {
+                let item = data::get_item(*id);
+                serde_json::json!({
+                    "id": id,
+                    "name": item.name,
+                    "qty": qty,
+                    "description": item.description,
+                    "category": format!("{:?}", item.category),
+                })
+            }).collect();
+        }
+
+        // Sort each pocket by item id for stable display
+        heal.sort_by_key(|v| v["id"].as_u64().unwrap_or(0));
+        battle_items.sort_by_key(|v| v["id"].as_u64().unwrap_or(0));
+        cases.sort_by_key(|v| v["id"].as_u64().unwrap_or(0));
+
+        serde_json::json!({
+            "heal": heal,
+            "battle": battle_items,
+            "cases": cases,
+        })
+        .to_string()
+    }
+
+    /// Get party state as JSON for the PartyScreen UI.
+    pub fn get_party_state(&self) -> String {
+        let active_idx = self.battle.as_ref().map(|b| b.player_active).unwrap_or(0);
+
+        let party: Vec<serde_json::Value> = self.state.player.party.iter().enumerate().map(|(i, snk)| {
+            let species = data::get_species(snk.species_id);
+            let status = snk.status.as_ref().map(|s| format!("{:?}", s.status_type()));
+            serde_json::json!({
+                "uid": snk.uid,
+                "species_id": snk.species_id,
+                "name": snk.display_name(species),
+                "level": snk.level,
+                "current_hp": snk.current_hp,
+                "max_hp": snk.max_hp,
+                "faction": format!("{:?}", species.faction),
+                "rarity_tier": format!("{:?}", species.rarity_tier),
+                "status": status,
+                "is_active": i == active_idx,
+                "is_fainted": snk.current_hp == 0,
+            })
+        }).collect();
+
+        serde_json::to_string(&party).unwrap_or_else(|_| "[]".to_string())
     }
 
     // ── Getters for JS ──
