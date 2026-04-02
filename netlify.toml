@@ -1,0 +1,13 @@
+[build]
+  base = "/"
+  command = "curl https://sh.rustup.rs -sSf | sh -s -- -y && source $HOME/.cargo/env && cargo install wasm-pack && pnpm install && pnpm run build"
+  publish = "client/dist"
+
+[build.environment]
+  NODE_VERSION = "20"
+  RUST_LOG = "warn"
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

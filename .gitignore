@@ -4,3 +4,5 @@ target
 client/src/wasm
 *.wasm
 .DS_Store
+build.log
+.current_prd
