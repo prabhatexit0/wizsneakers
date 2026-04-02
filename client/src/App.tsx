@@ -15,9 +15,14 @@ import { renderTiles } from './rendering/tileRenderer'
 import { generateCharSheet, getCharSrc, CHAR_W, CHAR_H } from './rendering/sprites'
 import { BattleScreen } from './components/battle/BattleScreen'
 import { DialogueBox } from './components/DialogueBox'
+import { TitleScreen } from './components/TitleScreen'
+import { PauseMenu } from './components/menu/PauseMenu'
 import type { DialoguePage } from './components/DialogueBox'
+import { autoSave } from './state/saveLoad'
+import init, { GameEngine } from './wasm/wizsneakers_engine.js'
 
 type Facing = 'up' | 'down' | 'left' | 'right'
+type AppState = 'title' | 'game'
 
 interface NpcRenderInfo {
   id: string
@@ -40,6 +45,12 @@ function App() {
   const [dialoguePage, setDialoguePage] = useState<DialoguePage | null>(null)
   const [trainerSpotted, setTrainerSpotted] = useState<string | null>(null)
   const [npcsState, setNpcsState] = useState<NpcRenderInfo[]>([])
+  const [appState, setAppState] = useState<AppState>('title')
+  const [pauseOpen, setPauseOpen] = useState(false)
+  const pauseOpenRef = useRef(false)
+
+  // Keep ref in sync for game loop access
+  useEffect(() => { pauseOpenRef.current = pauseOpen }, [pauseOpen])
 
   const render = useCallback((
     px: number, py: number,
@@ -58,13 +69,11 @@ function App() {
 
     if (!charSheet) charSheet = generateCharSheet()
 
-    // Camera tracks the interpolated player position
     const camera = calculateCamera(px, py, mapW, mapH, moveProgress, facing)
     const tileRange = getVisibleTileRange(camera)
 
     renderTiles(ctx, eng, camera, tileRange)
 
-    // Draw NPCs as orange rectangles
     if (npcs && npcs.length > 0) {
       for (const npc of npcs) {
         if (npc.defeated) continue
@@ -78,7 +87,6 @@ function App() {
           TILE_SIZE * RENDER_SCALE - 4,
         )
 
-        // Draw "!" exclamation above trainer that spotted player
         if (npc.is_trainer && trainerSpottedId === npc.id) {
           ctx.fillStyle = '#ffff00'
           ctx.font = `bold ${14 * RENDER_SCALE}px "Courier New", monospace`
@@ -88,7 +96,6 @@ function App() {
       }
     }
 
-    // Interpolated render position
     const facingDelta: Record<Facing, [number, number]> = {
       up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0],
     }
@@ -96,7 +103,6 @@ function App() {
     const renderX = (px + dx * moveProgress) * TILE_PX - camera.x
     const renderY = (py + dy * moveProgress) * TILE_PX - camera.y
 
-    // Draw character sprite
     const isMoving = moveProgress > 0
     const frame = isMoving ? (walkFrame ?? 1) : 0
     const { sx, sy } = getCharSrc(facing, frame)
@@ -108,7 +114,7 @@ function App() {
     )
   }, [engine])
 
-  // Game loop: 60fps, passes dt to engine
+  // Game loop
   useGameLoop(
     useCallback((dt: number) => {
       const eng = engine.current
@@ -117,8 +123,9 @@ function App() {
       const mode = eng.mode()
       setGameMode(mode)
 
+      if (pauseOpenRef.current) return
+
       if (mode === 'Battle') {
-        // Just tick time — BattleScreen manages its own state
         eng.tick(dt, 'none')
         return
       }
@@ -142,21 +149,20 @@ function App() {
       if (state.encounter) {
         setEncounter(true)
         setTimeout(() => setEncounter(false), 1500)
+        // Autosave on new encounter
+        try { autoSave(eng) } catch { /* ignore */ }
       }
 
-      // Update NPC state for rendering
       if (state.npcs) {
         setNpcsState(state.npcs)
       }
 
-      // Track trainer spotted
       setTrainerSpotted(state.trainer_spotted ?? null)
 
-      // Update dialogue page when in dialogue mode
       if (state.mode === 'Dialogue' && state.dialogue_page) {
         setDialoguePage(state.dialogue_page)
       } else if (state.mode !== 'Dialogue') {
-        // Clear dialogue when leaving dialogue mode
+        // no-op
       }
 
       const steps = eng.step_count()
@@ -171,24 +177,77 @@ function App() {
         state.trainer_spotted,
       )
     }, [engine, inputRef, render]),
-    ready,
+    ready && appState === 'game',
   )
 
   // Initial render
   useEffect(() => {
-    if (ready) {
+    if (ready && appState === 'game') {
       const eng = engine.current
       if (!eng) return
       render(eng.player_x(), eng.player_y(), 'down', 0, eng.map_width(), eng.map_height())
     }
-  }, [ready, render, engine])
+  }, [ready, render, engine, appState])
+
+  // Escape key toggles pause menu in overworld
+  useEffect(() => {
+    if (appState !== 'game') return
+    const handler = (e: KeyboardEvent) => {
+      if (e.repeat) return
+      if (e.code === 'Escape' && gameMode === 'Overworld') {
+        setPauseOpen(p => !p)
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [appState, gameMode])
 
   if (error) {
     return <div style={{ color: '#ff6b6b', padding: 40 }}>WASM Error: {error}</div>
   }
 
+  // Title screen — shown until player starts a game
   if (!ready) {
-    return <div style={{ padding: 40 }}>Loading engine...</div>
+    return <div style={{ padding: 40, fontFamily: '"Courier New", monospace' }}>Loading engine...</div>
+  }
+
+  if (appState === 'title') {
+    return (
+      <TitleScreen
+        onNewGame={(name) => {
+          const eng = engine.current
+          if (!eng) return
+          const anyEng = eng as unknown as Record<string, (n: string) => void>
+          anyEng['set_player_name'](name)
+          setAppState('game')
+        }}
+        onContinue={(saveData) => {
+          // Load save using static method
+          init().then(() => {
+            try {
+              const loaded = GameEngine.load_save(saveData)
+              // Re-load map data
+              fetch('/maps/boxfresh_town.json')
+                .then(r => r.text())
+                .then(json => {
+                  loaded.load_map_data(json)
+                  engine.current = loaded
+                  setAppState('game')
+                })
+                .catch(() => {
+                  engine.current = loaded
+                  setAppState('game')
+                })
+            } catch {
+              // If load fails, just start game with current engine
+              setAppState('game')
+            }
+          }).catch(() => {
+            setAppState('game')
+          })
+        }}
+      />
+    )
   }
 
   // ── Battle screen ────────────────────────────────────────────────────────────
@@ -216,7 +275,9 @@ function App() {
     )
   }
 
-  // ── Overworld (+ Dialogue overlay) ───────────────────────────────────────────
+  // ── Overworld (+ Dialogue overlay + Pause menu) ───────────────────────────────
+  const eng = engine.current
+
   return (
     <div>
       <h1 style={{ fontSize: 24, marginBottom: 8, color: '#ff6b6b' }}>
@@ -241,7 +302,7 @@ function App() {
           }}
         />
 
-        {/* Dialogue overlay — shown when mode is Dialogue */}
+        {/* Dialogue overlay */}
         {gameMode === 'Dialogue' && dialoguePage && (
           <div
             style={{
@@ -254,9 +315,9 @@ function App() {
             <DialogueBox
               page={dialoguePage}
               onAdvance={() => {
-                const eng = engine.current
-                if (!eng) return
-                const result = JSON.parse(eng.advance_dialogue())
+                const e = engine.current
+                if (!e) return
+                const result = JSON.parse(e.advance_dialogue())
                 if (result.status === 'end') {
                   setGameMode('Overworld')
                   setDialoguePage(null)
@@ -265,9 +326,9 @@ function App() {
                 }
               }}
               onChoice={(index) => {
-                const eng = engine.current
-                if (!eng) return
-                const result = JSON.parse(eng.select_choice(index))
+                const e = engine.current
+                if (!e) return
+                const result = JSON.parse(e.select_choice(index))
                 if (result.status === 'end') {
                   setGameMode('Overworld')
                   setDialoguePage(null)
@@ -310,6 +371,14 @@ function App() {
           100% { opacity: 0; }
         }
       `}</style>
+
+      {/* Pause menu overlay */}
+      {pauseOpen && eng && (
+        <PauseMenu
+          engine={eng}
+          onClose={() => setPauseOpen(false)}
+        />
+      )}
     </div>
   )
 }

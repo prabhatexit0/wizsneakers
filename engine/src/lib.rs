@@ -939,6 +939,327 @@ impl GameEngine {
         })
         .to_string()
     }
+
+    // ── Save / Load ───────────────────────────────────────────────────────────
+
+    /// Serialize the full GameState to a JSON string for saving.
+    pub fn export_save(&self) -> String {
+        serde_json::to_string(&self.state).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    /// Reconstruct a GameEngine from a previously exported save JSON.
+    /// Map data and dialogue data must be reloaded by the client afterward.
+    pub fn load_save(json: &str) -> Result<GameEngine, JsValue> {
+        let state: GameState = serde_json::from_str(json)
+            .map_err(|e| JsValue::from_str(&format!("Failed to parse save: {}", e)))?;
+        let seed = state.play_time_ms.wrapping_add(1);
+        let mut map = vec![0u8; MAP_WIDTH * MAP_HEIGHT];
+        for x in 0..MAP_WIDTH {
+            map[x] = 1;
+            map[(MAP_HEIGHT - 1) * MAP_WIDTH + x] = 1;
+        }
+        for y in 0..MAP_HEIGHT {
+            map[y * MAP_WIDTH] = 1;
+            map[y * MAP_WIDTH + MAP_WIDTH - 1] = 1;
+        }
+        Ok(GameEngine {
+            state,
+            rng: SeededRng::new(seed),
+            map,
+            map_width: MAP_WIDTH,
+            map_height: MAP_HEIGHT,
+            current_map: None,
+            step_count: 0,
+            encounter_triggered: false,
+            battle: None,
+            npcs: Vec::new(),
+            dialogue_state: None,
+            dialogue_db: HashMap::new(),
+            trainer_spotted: None,
+            trainer_approach_timer: 0.0,
+            action_consumed: false,
+        })
+    }
+
+    /// Set the player's name.
+    pub fn set_player_name(&mut self, name: &str) {
+        self.state.player.name = name.to_string();
+    }
+
+    /// Use an item on a party member in the overworld.
+    /// Returns JSON: {"ok": bool, "error": string}
+    pub fn use_item(&mut self, item_id: u16, target_index: u8) -> String {
+        use models::{ItemCategory, ItemEffect, InventoryPocket};
+        let item = data::get_item(item_id);
+        let party_len = self.state.player.party.len();
+        let target_idx = target_index as usize;
+        if target_idx >= party_len {
+            return serde_json::json!({"ok": false, "error": "Invalid party index"}).to_string();
+        }
+        let is_fainted = self.state.player.party[target_idx].current_hp == 0;
+        let is_revive = matches!(item.effect, ItemEffect::Revive(_) | ItemEffect::ReviveFull);
+        if is_fainted && !is_revive {
+            return serde_json::json!({"ok": false, "error": "Cannot use this item on a fainted sneaker"}).to_string();
+        }
+        match item.effect {
+            ItemEffect::HealHp(amount) => {
+                let snk = &mut self.state.player.party[target_idx];
+                snk.current_hp = (snk.current_hp + amount).min(snk.max_hp);
+            }
+            ItemEffect::HealFull => {
+                let snk = &mut self.state.player.party[target_idx];
+                snk.current_hp = snk.max_hp;
+            }
+            ItemEffect::Revive(pct) => {
+                let snk = &mut self.state.player.party[target_idx];
+                if snk.current_hp == 0 {
+                    snk.current_hp = ((snk.max_hp as u32 * pct as u32) / 100).max(1) as u16;
+                }
+            }
+            ItemEffect::ReviveFull => {
+                let snk = &mut self.state.player.party[target_idx];
+                if snk.current_hp == 0 {
+                    snk.current_hp = snk.max_hp;
+                }
+            }
+            ItemEffect::CureStatus(Some(st)) => {
+                let snk = &mut self.state.player.party[target_idx];
+                if snk.status.as_ref().map(|s| s.status_type() == st).unwrap_or(false) {
+                    snk.status = None;
+                }
+            }
+            ItemEffect::CureStatus(None) | ItemEffect::CureAll => {
+                self.state.player.party[target_idx].status = None;
+            }
+            ItemEffect::RestorePp(amount) => {
+                let snk = &mut self.state.player.party[target_idx];
+                for slot in snk.moves.iter_mut().flatten() {
+                    slot.current_pp = (slot.current_pp + amount).min(slot.max_pp);
+                }
+            }
+            ItemEffect::RestoreAllPp => {
+                let snk = &mut self.state.player.party[target_idx];
+                for slot in snk.moves.iter_mut().flatten() {
+                    slot.current_pp = slot.max_pp;
+                }
+            }
+            _ => {
+                return serde_json::json!({"ok": false, "error": "Cannot use this item outside of battle"}).to_string();
+            }
+        }
+        // Consume the item
+        let pocket = match item.category {
+            ItemCategory::HealItem => Some(InventoryPocket::HealItems),
+            ItemCategory::BattleItem => Some(InventoryPocket::BattleItems),
+            ItemCategory::SneakerCase => Some(InventoryPocket::SneakerCases),
+            ItemCategory::HeldItem => Some(InventoryPocket::HeldItems),
+            ItemCategory::KeyItem => None,
+        };
+        if let Some(p) = pocket {
+            self.state.player.bag.remove_item(item_id, 1, p);
+        }
+        serde_json::json!({"ok": true}).to_string()
+    }
+
+    /// Buy an item from a shop: deducts money and adds item to bag.
+    /// Returns JSON: {"ok": bool, "money": u32, "error": string}
+    pub fn buy_item(&mut self, item_id: u16, quantity: u16) -> String {
+        use models::{ItemCategory, InventoryPocket};
+        let item = data::get_item(item_id);
+        let total_cost = item.cost as u64 * quantity as u64;
+        if (self.state.player.money as u64) < total_cost {
+            return serde_json::json!({"ok": false, "error": "Insufficient money"}).to_string();
+        }
+        self.state.player.money -= total_cost as u32;
+        match item.category {
+            ItemCategory::KeyItem => {
+                if !self.state.player.bag.key_items.contains(&item_id) {
+                    self.state.player.bag.key_items.push(item_id);
+                }
+            }
+            ItemCategory::HealItem => {
+                self.state.player.bag.add_item(item_id, quantity, InventoryPocket::HealItems);
+            }
+            ItemCategory::BattleItem => {
+                self.state.player.bag.add_item(item_id, quantity, InventoryPocket::BattleItems);
+            }
+            ItemCategory::SneakerCase => {
+                self.state.player.bag.add_item(item_id, quantity, InventoryPocket::SneakerCases);
+            }
+            ItemCategory::HeldItem => {
+                self.state.player.bag.add_item(item_id, quantity, InventoryPocket::HeldItems);
+            }
+        }
+        serde_json::json!({"ok": true, "money": self.state.player.money}).to_string()
+    }
+
+    /// Sell an item: adds money and removes item from bag.
+    /// Returns JSON: {"ok": bool, "money": u32, "error": string}
+    pub fn sell_item(&mut self, item_id: u16, quantity: u16) -> String {
+        use models::{ItemCategory, InventoryPocket};
+        let item = data::get_item(item_id);
+        if item.category == ItemCategory::KeyItem {
+            return serde_json::json!({"ok": false, "error": "Cannot sell key items"}).to_string();
+        }
+        let pocket = match item.category {
+            ItemCategory::HealItem => InventoryPocket::HealItems,
+            ItemCategory::BattleItem => InventoryPocket::BattleItems,
+            ItemCategory::SneakerCase => InventoryPocket::SneakerCases,
+            ItemCategory::HeldItem => InventoryPocket::HeldItems,
+            ItemCategory::KeyItem => unreachable!(),
+        };
+        if !self.state.player.bag.remove_item(item_id, quantity, pocket) {
+            return serde_json::json!({"ok": false, "error": "Item not found or insufficient quantity"}).to_string();
+        }
+        let sell_price = (item.cost / 2) as u64 * quantity as u64;
+        self.state.player.money = self.state.player.money.saturating_add(sell_price as u32);
+        serde_json::json!({"ok": true, "money": self.state.player.money}).to_string()
+    }
+
+    /// Get full inventory as JSON (all pockets with cost and sell price).
+    pub fn get_inventory(&self) -> String {
+        use models::ItemCategory;
+        let bag = &self.state.player.bag;
+        let heal: Vec<serde_json::Value> = bag.heal_items.iter().map(|(id, qty)| {
+            let item = data::get_item(*id);
+            serde_json::json!({"id": id, "name": item.name, "qty": qty, "description": item.description, "category": "HealItem", "cost": item.cost, "sell_price": item.cost / 2})
+        }).collect();
+        let battle_items: Vec<serde_json::Value> = bag.battle_items.iter().map(|(id, qty)| {
+            let item = data::get_item(*id);
+            serde_json::json!({"id": id, "name": item.name, "qty": qty, "description": item.description, "category": "BattleItem", "cost": item.cost, "sell_price": item.cost / 2})
+        }).collect();
+        let cases: Vec<serde_json::Value> = bag.sneaker_cases.iter().map(|(id, qty)| {
+            let item = data::get_item(*id);
+            serde_json::json!({"id": id, "name": item.name, "qty": qty, "description": item.description, "category": "SneakerCase", "cost": item.cost, "sell_price": item.cost / 2})
+        }).collect();
+        let key_items: Vec<serde_json::Value> = bag.key_items.iter().map(|id| {
+            let item = data::get_item(*id);
+            serde_json::json!({"id": id, "name": item.name, "description": item.description, "category": "KeyItem"})
+        }).collect();
+        let held: Vec<serde_json::Value> = bag.held_items.iter().map(|(id, qty)| {
+            let item = data::get_item(*id);
+            serde_json::json!({"id": id, "name": item.name, "qty": qty, "description": item.description, "category": "HeldItem", "cost": item.cost, "sell_price": item.cost / 2})
+        }).collect();
+        let _ = ItemCategory::HealItem; // suppress unused import warning
+        serde_json::json!({"heal": heal, "battle": battle_items, "cases": cases, "key_items": key_items, "held": held}).to_string()
+    }
+
+    /// Get party summaries as JSON (same as get_party_state but aliased for overworld use).
+    pub fn get_party(&self) -> String {
+        self.get_party_state()
+    }
+
+    /// Get player info (name, money, play time, stamps, dex progress).
+    pub fn get_player_info(&self) -> String {
+        let dex = &self.state.player.sneakerdex;
+        let seen = dex.entries.iter().filter(|e| e.seen || e.caught).count();
+        let caught = dex.entries.iter().filter(|e| e.caught).count();
+        let stamps_earned = self.state.authentication_stamps.iter().filter(|&&s| s).count();
+        serde_json::json!({
+            "name": self.state.player.name,
+            "money": self.state.player.money,
+            "play_time_ms": self.state.play_time_ms,
+            "stamps": self.state.authentication_stamps,
+            "stamps_earned": stamps_earned,
+            "sneakerdex_seen": seen,
+            "sneakerdex_caught": caught,
+        }).to_string()
+    }
+
+    /// Get Sneakerdex data as JSON.
+    pub fn get_sneakerdex(&self) -> String {
+        let dex = &self.state.player.sneakerdex;
+        let entries: Vec<serde_json::Value> = dex.entries.iter().enumerate().map(|(i, entry)| {
+            let species_id = (i + 1) as u16;
+            if entry.seen || entry.caught {
+                let species = data::get_species(species_id);
+                let base_stats = if entry.caught {
+                    serde_json::json!({
+                        "durability": species.base_stats.durability,
+                        "hype": species.base_stats.hype,
+                        "comfort": species.base_stats.comfort,
+                        "drip": species.base_stats.drip,
+                        "rarity": species.base_stats.rarity,
+                    })
+                } else {
+                    serde_json::Value::Null
+                };
+                serde_json::json!({
+                    "number": species_id,
+                    "seen": entry.seen || entry.caught,
+                    "caught": entry.caught,
+                    "name": species.name,
+                    "faction": format!("{:?}", species.faction),
+                    "description": if entry.caught { species.description } else { "" },
+                    "base_stats": base_stats,
+                })
+            } else {
+                serde_json::json!({
+                    "number": species_id,
+                    "seen": false,
+                    "caught": false,
+                    "name": serde_json::Value::Null,
+                    "faction": serde_json::Value::Null,
+                    "description": serde_json::Value::Null,
+                    "base_stats": serde_json::Value::Null,
+                })
+            }
+        }).collect();
+        let total_seen = dex.entries.iter().filter(|e| e.seen || e.caught).count();
+        let total_caught = dex.entries.iter().filter(|e| e.caught).count();
+        serde_json::json!({
+            "entries": entries,
+            "total_seen": total_seen,
+            "total_caught": total_caught,
+            "total_species": 30,
+        }).to_string()
+    }
+
+    /// Restore all party members to full HP, PP, and clear status conditions.
+    pub fn heal_party(&mut self) {
+        for snk in &mut self.state.player.party {
+            snk.current_hp = snk.max_hp;
+            snk.status = None;
+            snk.on_fire_turns = 0;
+            for slot in snk.moves.iter_mut().flatten() {
+                slot.current_pp = slot.max_pp;
+            }
+        }
+    }
+
+    /// Deposit a party member (by party index) into the sneaker box.
+    /// Returns JSON: {"ok": bool, "error": string}
+    pub fn deposit_sneaker(&mut self, party_index: u8) -> String {
+        let party_len = self.state.player.party.len();
+        if party_len <= 1 {
+            return serde_json::json!({"ok": false, "error": "Cannot deposit last party member"}).to_string();
+        }
+        if self.state.player.sneaker_box.is_full() {
+            return serde_json::json!({"ok": false, "error": "Box is full"}).to_string();
+        }
+        let idx = party_index as usize;
+        if idx >= party_len {
+            return serde_json::json!({"ok": false, "error": "Invalid party index"}).to_string();
+        }
+        let sneaker = self.state.player.party.remove(idx);
+        self.state.player.sneaker_box.deposit(sneaker);
+        serde_json::json!({"ok": true}).to_string()
+    }
+
+    /// Withdraw a sneaker from the box (by box index) into the party.
+    /// Returns JSON: {"ok": bool, "error": string}
+    pub fn withdraw_sneaker(&mut self, box_index: u16) -> String {
+        if self.state.player.party.len() >= 6 {
+            return serde_json::json!({"ok": false, "error": "Party is full"}).to_string();
+        }
+        let idx = box_index as usize;
+        if idx >= self.state.player.sneaker_box.sneakers.len() {
+            return serde_json::json!({"ok": false, "error": "Invalid box index"}).to_string();
+        }
+        let sneaker = self.state.player.sneaker_box.sneakers.remove(idx);
+        self.state.player.party.push(sneaker);
+        serde_json::json!({"ok": true}).to_string()
+    }
 }
 
 impl GameEngine {
@@ -1107,6 +1428,284 @@ impl GameEngine {
         if let Some(npc) = self.npcs.iter_mut().find(|n| n.id == trainer_id) {
             npc.defeated = true;
         }
+    }
+}
+
+// ── Phase 7 Tests ─────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests_phase_7 {
+    use super::*;
+    use crate::world::encounters::generate_wild_sneaker;
+    use crate::models::inventory::InventoryPocket;
+    use crate::models::sneaker::StatusCondition;
+
+    fn make_engine_with_party() -> GameEngine {
+        let mut eng = GameEngine::new(12345);
+        let mut rng = SeededRng::new(42);
+        let sneaker = generate_wild_sneaker(1, 10, &mut rng);
+        eng.state.player.party.push(sneaker);
+        eng
+    }
+
+    // ── Save / Load ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn export_save_produces_valid_json() {
+        let eng = GameEngine::new(1);
+        let json = eng.export_save();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v.is_object());
+    }
+
+    #[test]
+    fn load_save_produces_identical_state() {
+        let mut eng = GameEngine::new(1);
+        eng.state.player.money = 9999;
+        eng.state.player.name = "TestPlayer".to_string();
+        let json = eng.export_save();
+        let loaded = GameEngine::load_save(&json).expect("load_save failed");
+        assert_eq!(loaded.state.player.money, 9999);
+        assert_eq!(loaded.state.player.name, "TestPlayer");
+    }
+
+    #[test]
+    fn player_position_preserved_through_save_load() {
+        let mut eng = GameEngine::new(1);
+        eng.state.player.x = 10;
+        eng.state.player.y = 7;
+        let json = eng.export_save();
+        let loaded = GameEngine::load_save(&json).expect("load_save failed");
+        assert_eq!(loaded.state.player.x, 10);
+        assert_eq!(loaded.state.player.y, 7);
+    }
+
+    #[test]
+    fn party_preserved_through_save_load() {
+        let mut eng = make_engine_with_party();
+        let json = eng.export_save();
+        let loaded = GameEngine::load_save(&json).expect("load_save failed");
+        assert_eq!(loaded.state.player.party.len(), 1);
+        assert_eq!(loaded.state.player.party[0].species_id, 1);
+    }
+
+    #[test]
+    fn inventory_preserved_through_save_load() {
+        let mut eng = GameEngine::new(1);
+        eng.state.player.bag.add_item(1, 3, InventoryPocket::HealItems);
+        let json = eng.export_save();
+        let loaded = GameEngine::load_save(&json).expect("load_save failed");
+        assert_eq!(loaded.state.player.bag.heal_items.len(), 1);
+        assert_eq!(loaded.state.player.bag.heal_items[0], (1, 3));
+    }
+
+    #[test]
+    fn event_flags_preserved_through_save_load() {
+        let mut eng = GameEngine::new(1);
+        eng.state.event_flags.insert("test_flag".to_string());
+        let json = eng.export_save();
+        let loaded = GameEngine::load_save(&json).expect("load_save failed");
+        assert!(loaded.state.event_flags.contains("test_flag"));
+    }
+
+    // ── Inventory operations ─────────────────────────────────────────────────
+
+    #[test]
+    fn buy_item_deducts_money_and_adds_item() {
+        let mut eng = GameEngine::new(1);
+        eng.state.player.money = 1000;
+        let result: serde_json::Value = serde_json::from_str(&eng.buy_item(1, 2)).unwrap();
+        assert_eq!(result["ok"], true);
+        // Sole Sauce costs 200 each, 2x = 400 deducted
+        assert_eq!(eng.state.player.money, 600);
+        assert_eq!(eng.state.player.bag.heal_items[0], (1, 2));
+    }
+
+    #[test]
+    fn buy_item_fails_with_insufficient_money() {
+        let mut eng = GameEngine::new(1);
+        eng.state.player.money = 100;
+        let result: serde_json::Value = serde_json::from_str(&eng.buy_item(1, 1)).unwrap();
+        assert_eq!(result["ok"], false);
+        assert_eq!(eng.state.player.money, 100);
+    }
+
+    #[test]
+    fn sell_item_adds_money_and_removes_item() {
+        let mut eng = GameEngine::new(1);
+        eng.state.player.money = 0;
+        eng.state.player.bag.add_item(1, 1, InventoryPocket::HealItems);
+        let result: serde_json::Value = serde_json::from_str(&eng.sell_item(1, 1)).unwrap();
+        assert_eq!(result["ok"], true);
+        // Sole Sauce cost 200, sell price = 100
+        assert_eq!(eng.state.player.money, 100);
+        assert!(eng.state.player.bag.heal_items.is_empty());
+    }
+
+    #[test]
+    fn use_item_sole_sauce_heals_20_hp() {
+        let mut eng = make_engine_with_party();
+        eng.state.player.party[0].current_hp = 10;
+        let max_hp = eng.state.player.party[0].max_hp;
+        eng.state.player.bag.add_item(1, 1, InventoryPocket::HealItems);
+        let result: serde_json::Value = serde_json::from_str(&eng.use_item(1, 0)).unwrap();
+        assert_eq!(result["ok"], true);
+        let expected = (10u16 + 20).min(max_hp);
+        assert_eq!(eng.state.player.party[0].current_hp, expected);
+    }
+
+    #[test]
+    fn use_item_full_restore_heals_to_max() {
+        let mut eng = make_engine_with_party();
+        eng.state.player.party[0].current_hp = 1;
+        let max_hp = eng.state.player.party[0].max_hp;
+        eng.state.player.bag.add_item(3, 1, InventoryPocket::HealItems);
+        let result: serde_json::Value = serde_json::from_str(&eng.use_item(3, 0)).unwrap();
+        assert_eq!(result["ok"], true);
+        assert_eq!(eng.state.player.party[0].current_hp, max_hp);
+    }
+
+    #[test]
+    fn cant_use_item_on_fainted_sneaker_unless_revive() {
+        let mut eng = make_engine_with_party();
+        eng.state.player.party[0].current_hp = 0;
+        eng.state.player.bag.add_item(1, 1, InventoryPocket::HealItems);
+        let result: serde_json::Value = serde_json::from_str(&eng.use_item(1, 0)).unwrap();
+        assert_eq!(result["ok"], false);
+    }
+
+    // ── Heal party ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn heal_party_restores_all_sneakers_to_max_hp() {
+        let mut eng = make_engine_with_party();
+        eng.state.player.party[0].current_hp = 1;
+        let max_hp = eng.state.player.party[0].max_hp;
+        eng.heal_party();
+        assert_eq!(eng.state.player.party[0].current_hp, max_hp);
+    }
+
+    #[test]
+    fn heal_party_restores_pp() {
+        let mut eng = make_engine_with_party();
+        if let Some(slot) = eng.state.player.party[0].moves[0].as_mut() {
+            slot.current_pp = 0;
+        }
+        eng.heal_party();
+        if let Some(slot) = eng.state.player.party[0].moves[0].as_ref() {
+            assert_eq!(slot.current_pp, slot.max_pp);
+        }
+    }
+
+    #[test]
+    fn heal_party_clears_status_conditions() {
+        let mut eng = make_engine_with_party();
+        eng.state.player.party[0].status = Some(StatusCondition::Creased);
+        eng.heal_party();
+        assert!(eng.state.player.party[0].status.is_none());
+    }
+
+    // ── Sneaker Box ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn deposit_moves_sneaker_from_party_to_box() {
+        let mut eng = make_engine_with_party();
+        let mut rng = SeededRng::new(99);
+        let s2 = generate_wild_sneaker(2, 5, &mut rng);
+        eng.state.player.party.push(s2);
+        let result: serde_json::Value = serde_json::from_str(&eng.deposit_sneaker(0)).unwrap();
+        assert_eq!(result["ok"], true);
+        assert_eq!(eng.state.player.party.len(), 1);
+        assert_eq!(eng.state.player.sneaker_box.count(), 1);
+    }
+
+    #[test]
+    fn withdraw_moves_sneaker_from_box_to_party() {
+        let mut eng = make_engine_with_party();
+        let mut rng = SeededRng::new(77);
+        let s2 = generate_wild_sneaker(2, 5, &mut rng);
+        let uid = s2.uid;
+        eng.state.player.sneaker_box.deposit(s2);
+        let result: serde_json::Value = serde_json::from_str(&eng.withdraw_sneaker(0)).unwrap();
+        assert_eq!(result["ok"], true);
+        assert_eq!(eng.state.player.party.len(), 2);
+        assert!(eng.state.player.party.iter().any(|s| s.uid == uid));
+    }
+
+    #[test]
+    fn cant_deposit_last_party_member() {
+        let mut eng = make_engine_with_party();
+        let result: serde_json::Value = serde_json::from_str(&eng.deposit_sneaker(0)).unwrap();
+        assert_eq!(result["ok"], false);
+    }
+
+    #[test]
+    fn cant_withdraw_when_party_full() {
+        let mut eng = GameEngine::new(1);
+        let mut rng = SeededRng::new(42);
+        for _ in 0..6 {
+            let s = generate_wild_sneaker(1, 5, &mut rng);
+            eng.state.player.party.push(s);
+        }
+        let boxed = generate_wild_sneaker(1, 5, &mut rng);
+        eng.state.player.sneaker_box.deposit(boxed);
+        let result: serde_json::Value = serde_json::from_str(&eng.withdraw_sneaker(0)).unwrap();
+        assert_eq!(result["ok"], false);
+    }
+
+    #[test]
+    fn cant_deposit_when_box_full() {
+        let mut eng = GameEngine::new(1);
+        let mut rng = SeededRng::new(42);
+        for _ in 0..2 {
+            let s = generate_wild_sneaker(1, 5, &mut rng);
+            eng.state.player.party.push(s);
+        }
+        for _ in 0..50 {
+            let s = generate_wild_sneaker(1, 5, &mut rng);
+            eng.state.player.sneaker_box.deposit(s);
+        }
+        let result: serde_json::Value = serde_json::from_str(&eng.deposit_sneaker(0)).unwrap();
+        assert_eq!(result["ok"], false);
+    }
+
+    // ── Sneakerdex ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn new_game_all_dex_entries_unseen() {
+        let eng = GameEngine::new(1);
+        for entry in &eng.state.player.sneakerdex.entries {
+            assert!(!entry.seen);
+            assert!(!entry.caught);
+        }
+    }
+
+    #[test]
+    fn after_encountering_entry_marked_seen() {
+        let mut eng = GameEngine::new(1);
+        eng.state.player.sneakerdex.entries[0].seen = true;
+        assert!(eng.state.player.sneakerdex.entries[0].seen);
+        assert!(!eng.state.player.sneakerdex.entries[0].caught);
+    }
+
+    #[test]
+    fn after_catching_entry_marked_caught() {
+        let mut eng = GameEngine::new(1);
+        eng.state.player.sneakerdex.entries[0].seen = true;
+        eng.state.player.sneakerdex.entries[0].caught = true;
+        assert!(eng.state.player.sneakerdex.entries[0].caught);
+    }
+
+    #[test]
+    fn get_sneakerdex_returns_correct_counts() {
+        let mut eng = GameEngine::new(1);
+        eng.state.player.sneakerdex.entries[0].seen = true;
+        eng.state.player.sneakerdex.entries[0].caught = true;
+        eng.state.player.sneakerdex.entries[1].seen = true;
+        let v: serde_json::Value = serde_json::from_str(&eng.get_sneakerdex()).unwrap();
+        assert_eq!(v["total_seen"], 2);
+        assert_eq!(v["total_caught"], 1);
+        assert_eq!(v["total_species"], 30);
     }
 }
 

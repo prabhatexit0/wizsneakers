@@ -2,6 +2,8 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use crate::state::player::PlayerState;
 
+pub const SAVE_VERSION: u32 = 1;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GameMode {
     Overworld,

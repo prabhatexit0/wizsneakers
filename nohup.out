@@ -101,3 +101,12 @@
 [20:26:05]   Running verification...
 [20:26:15]   Verification PASSED
 [20:26:15]   PRD 11 COMPLETE
+[20:26:18]   Committed and pushed: feat: complete PRD 11 — 11-dialogue-npcs
+[20:26:18] 
+[20:26:18] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[20:26:18]   PRD 12/13: 12-menus-save
+[20:26:18] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[20:26:18]   Launching Claude Code...
+[20:56:29]   Running verification...
+[20:56:41]   Verification PASSED
+[20:56:41]   PRD 12 COMPLETE
