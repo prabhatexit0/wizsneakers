@@ -1,0 +1,100 @@
+[
+  {
+    "id": "clinic_nurse",
+    "pages": [
+      {
+        "speaker": "Nurse Lace",
+        "text": "Welcome to the Lace-Up Sneaker Clinic! We restore sneakers to perfect condition.",
+        "choices": [
+          { "text": "Heal my sneakers!", "next_dialogue": "clinic_healed", "set_flag": null, "action": "heal_party" },
+          { "text": "No thanks.", "next_dialogue": null, "set_flag": null, "action": null }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "clinic_healed",
+    "pages": [
+      {
+        "speaker": "Nurse Lace",
+        "text": "All done! Your sneakers are in perfect condition. Come back any time!",
+        "choices": null
+      }
+    ]
+  },
+  {
+    "id": "retro_rick_intro",
+    "pages": [
+      {
+        "speaker": "Retro Rick",
+        "text": "Welcome to Retro Rick's Vintage Shop! I've got the freshest old-school gear in the city.",
+        "choices": null
+      },
+      {
+        "speaker": "Retro Rick",
+        "text": "Check out my selection of Sole Sauce, Insole Pads, and Sneaker Cases. Quality guaranteed!",
+        "choices": null
+      }
+    ]
+  },
+  {
+    "id": "laceup_clinic_sign",
+    "pages": [
+      {
+        "speaker": "Passerby",
+        "text": "That's the Sneaker Clinic. They'll restore all your sneakers to full health for free!",
+        "choices": null
+      }
+    ]
+  },
+  {
+    "id": "laceup_shop_npc",
+    "pages": [
+      {
+        "speaker": "Shopper",
+        "text": "Retro Rick's has the best deals on supplies. Stock up before heading into tall grass!",
+        "choices": null
+      }
+    ]
+  },
+  {
+    "id": "laceup_museum_npc",
+    "pages": [
+      {
+        "speaker": "Professor",
+        "text": "The Sneaker Museum documents centuries of footwear history. Did you know type matchups were codified in the Great Drip Wars of '92?",
+        "choices": null
+      },
+      {
+        "speaker": "Professor",
+        "text": "Retro beats High-Fashion. Techwear beats Retro. Skate beats Techwear. High-Fashion beats Skate. It's a perfect circle of style!",
+        "choices": null
+      }
+    ]
+  },
+  {
+    "id": "laceup_townsperson_1",
+    "pages": [
+      {
+        "speaker": "Local",
+        "text": "Welcome to Lace-Up Village! The gym here specializes in Retro-type training.",
+        "choices": null
+      },
+      {
+        "speaker": "Local",
+        "text": "The gym leader is pretty tough though. You'll want a full team before challenging them!",
+        "choices": null
+      }
+    ]
+  },
+  {
+    "id": "laceup_townsperson_2",
+    "pages": [
+      {
+        "speaker": "Villager",
+        "text": "I heard there's a Syndicate operative spotted near Route 2. Be careful if you head east!",
+        "choices": null
+      }
+    ]
+  }
+]

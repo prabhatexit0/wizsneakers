@@ -1,5 +1,55 @@
 use serde::{Deserialize, Serialize};
 
+/// A pending map transition triggered by walking to an edge or through a door/warp.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MapTransition {
+    pub target_map: String,
+    pub target_x: u16,
+    pub target_y: u16,
+    pub transition_type: TransitionType,
+    /// Direction of travel: "north"/"south"/"east"/"west" for edge transitions, "warp" for explicit warps
+    pub direction: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransitionType {
+    Walk,
+    Fade,
+    Warp,
+}
+
+/// Compute a map transition when the player walks off a map edge.
+///
+/// `direction`: "north" | "south" | "east" | "west"
+/// Returns `Some(MapTransition)` if there is a connection, `None` if the edge is blocked.
+pub fn trigger_map_transition(
+    direction: &str,
+    map: &MapData,
+    player_x: u16,
+    _player_y: u16,
+) -> Option<MapTransition> {
+    let target_map = match direction {
+        "north" => map.connections.north.clone(),
+        "south" => map.connections.south.clone(),
+        "east"  => map.connections.east.clone(),
+        "west"  => map.connections.west.clone(),
+        _ => None,
+    }?;
+
+    // Player position in target map: same X for north/south, same Y for east/west.
+    // The exact Y/X on the target side is set in load_map_from_json when the new map loads.
+    let target_x = player_x; // kept for east/west use
+    let target_y = 0;        // placeholder; overridden in load_map_from_json
+
+    Some(MapTransition {
+        target_map,
+        target_x,
+        target_y,
+        transition_type: TransitionType::Walk,
+        direction: direction.to_string(),
+    })
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MapConnections {
     pub north: Option<String>,

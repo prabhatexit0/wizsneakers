@@ -1,0 +1,62 @@
+[
+  {
+    "id": "trainer_jake_pre",
+    "pages": [
+      {
+        "speaker": "Hypebeast Jake",
+        "text": "Yo, you're blocking my drip! Classic Dunk versus whatever you've got — let's go!",
+        "choices": null
+      }
+    ]
+  },
+  {
+    "id": "trainer_jake_post",
+    "pages": [
+      {
+        "speaker": "Hypebeast Jake",
+        "text": "Nah nah nah... my Classic Dunks got slept on. I need to go re-up.",
+        "choices": null
+      }
+    ]
+  },
+  {
+    "id": "trainer_sam_pre",
+    "pages": [
+      {
+        "speaker": "Skater Kid Sam",
+        "text": "Hey! I've been skating Route 1 all day looking for someone to battle!",
+        "choices": null
+      }
+    ]
+  },
+  {
+    "id": "trainer_sam_post",
+    "pages": [
+      {
+        "speaker": "Skater Kid Sam",
+        "text": "Whoa... my Grip Tape really got wrecked. Back to the skate park to train more!",
+        "choices": null
+      }
+    ]
+  },
+  {
+    "id": "trainer_mia_pre",
+    "pages": [
+      {
+        "speaker": "Tech Nerd Mia",
+        "text": "Initiating battle sequence. My Foam Cell's firmware is fully updated. Are you ready to be defeated?",
+        "choices": null
+      }
+    ]
+  },
+  {
+    "id": "trainer_mia_post",
+    "pages": [
+      {
+        "speaker": "Tech Nerd Mia",
+        "text": "Error: unexpected loss detected. Running diagnostics... I need to upgrade my training protocol.",
+        "choices": null
+      }
+    ]
+  }
+]

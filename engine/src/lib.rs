@@ -14,7 +14,7 @@ pub use state::{GameState, GameMode};
 pub use util::rng::SeededRng;
 
 use state::player::Direction;
-use world::map::MapData;
+use world::map::{MapData, MapTransition, TransitionType};
 use world::movement::{parse_input, process_movement, GameEvent};
 use world::encounters::generate_wild_sneaker;
 use world::dialogue::{DialogueData, DialogueState};
@@ -54,6 +54,10 @@ pub struct GameEngine {
     trainer_approach_timer: f64,
     /// Deduplicate action key presses (prevent holding from spamming)
     action_consumed: bool,
+    /// Pending map transition (set when player walks off edge or through door)
+    pub(crate) pending_transition: Option<MapTransition>,
+    /// Species ID of rival Flip's starter (set by choose_starter)
+    pub(crate) rival_starter_id: u16,
 }
 
 #[wasm_bindgen]
@@ -108,6 +112,8 @@ impl GameEngine {
             trainer_spotted: None,
             trainer_approach_timer: 0.0,
             action_consumed: false,
+            pending_transition: None,
+            rival_starter_id: 0,
         }
     }
 
@@ -402,6 +408,89 @@ impl GameEngine {
             .to_string();
         }
 
+        // ── Edge transition detection ──────────────────────────────────────────
+        // Before any movement, check if the player is attempting to walk off the
+        // map edge in a direction that has a connection.
+        if !self.state.player.moving && self.pending_transition.is_none() {
+            let dir_opt: Option<Direction> = match action_str {
+                "up"    => Some(Direction::Up),
+                "down"  => Some(Direction::Down),
+                "left"  => Some(Direction::Left),
+                "right" => Some(Direction::Right),
+                _ => None,
+            };
+            if let Some(dir) = dir_opt {
+                if let Some(map) = &self.current_map.clone() {
+                    let (ddx, ddy) = dir.delta();
+                    let nx = self.state.player.x as isize + ddx;
+                    let ny = self.state.player.y as isize + ddy;
+                    let map_w = map.width as isize;
+                    let map_h = map.height as isize;
+
+                    // Check if the target tile is the border edge (solid outer row/col)
+                    let target_is_border = nx < 0 || ny < 0 || nx >= map_w || ny >= map_h
+                        || (nx >= 0 && ny >= 0 && nx < map_w && ny < map_h && {
+                            let tile = map.collision[ny as usize * map.width as usize + nx as usize];
+                            tile == 1 && (nx == 0 || ny == 0 || nx == map_w - 1 || ny == map_h - 1)
+                        });
+
+                    if target_is_border {
+                        let dir_str = match dir {
+                            Direction::Up    => "north",
+                            Direction::Down  => "south",
+                            Direction::Left  => "west",
+                            Direction::Right => "east",
+                        };
+                        let connection = match dir {
+                            Direction::Up    => map.connections.north.clone(),
+                            Direction::Down  => map.connections.south.clone(),
+                            Direction::Left  => map.connections.west.clone(),
+                            Direction::Right => map.connections.east.clone(),
+                        };
+                        if let Some(target_map) = connection {
+                            self.pending_transition = Some(MapTransition {
+                                target_map,
+                                target_x: self.state.player.x, // preserved for north/south
+                                target_y: self.state.player.y, // preserved for east/west
+                                transition_type: TransitionType::Walk,
+                                direction: dir_str.to_string(),
+                            });
+                            self.state.player.facing = dir;
+                            // Return immediately so JS can handle the transition
+                            let facing_str3 = match self.state.player.facing {
+                                Direction::Up    => "up",
+                                Direction::Down  => "down",
+                                Direction::Left  => "left",
+                                Direction::Right => "right",
+                            };
+                            let npc_json = self.build_npc_json();
+                            let trans = self.pending_transition.as_ref().map(|t| serde_json::json!({
+                                "map": t.target_map,
+                                "x": t.target_x,
+                                "y": t.target_y,
+                                "type": format!("{:?}", t.transition_type).to_lowercase(),
+                                "direction": t.direction,
+                            }));
+                            return serde_json::json!({
+                                "player_x": self.state.player.x,
+                                "player_y": self.state.player.y,
+                                "facing": facing_str3,
+                                "moving": false,
+                                "move_progress": 0.0,
+                                "map_width": self.map_width,
+                                "map_height": self.map_height,
+                                "encounter": false,
+                                "mode": format!("{:?}", self.state.mode),
+                                "npcs": npc_json,
+                                "trainer_spotted": self.trainer_spotted,
+                                "transition": trans,
+                            }).to_string();
+                        }
+                    }
+                }
+            }
+        }
+
         // Handle action key (with edge detection)
         if action_str == "action" && !self.action_consumed {
             self.action_consumed = true;
@@ -469,10 +558,55 @@ impl GameEngine {
                     }
                     self.step_count += 1;
                 }
-                GameEvent::None => {}
-                _ => {
+                GameEvent::MapTransition { .. } => {
+                    // Door tile — look up event definition for target map/position
+                    let px = self.state.player.x;
+                    let py = self.state.player.y;
+                    if let Some(ev_def) = self.current_map.as_ref().and_then(|m| {
+                        m.events.iter().find(|e| e.x == px && e.y == py
+                            && (e.event_type == "warp_trigger" || e.event_type == "door"))
+                    }) {
+                        let parts: Vec<&str> = ev_def.data.split(':').collect();
+                        if parts.len() >= 3 {
+                            let target_map = parts[0].to_string();
+                            let tx: u16 = parts[1].parse().unwrap_or(1);
+                            let ty: u16 = parts[2].parse().unwrap_or(1);
+                            self.pending_transition = Some(MapTransition {
+                                target_map,
+                                target_x: tx,
+                                target_y: ty,
+                                transition_type: TransitionType::Fade,
+                                direction: "warp".to_string(),
+                            });
+                        }
+                    }
                     self.step_count += 1;
                 }
+                GameEvent::Warp { .. } => {
+                    // Warp tile — look up event definition
+                    let px = self.state.player.x;
+                    let py = self.state.player.y;
+                    if let Some(ev_def) = self.current_map.as_ref().and_then(|m| {
+                        m.events.iter().find(|e| e.x == px && e.y == py
+                            && (e.event_type == "warp_trigger" || e.event_type == "warp"))
+                    }) {
+                        let parts: Vec<&str> = ev_def.data.split(':').collect();
+                        if parts.len() >= 3 {
+                            let target_map = parts[0].to_string();
+                            let tx: u16 = parts[1].parse().unwrap_or(1);
+                            let ty: u16 = parts[2].parse().unwrap_or(1);
+                            self.pending_transition = Some(MapTransition {
+                                target_map,
+                                target_x: tx,
+                                target_y: ty,
+                                transition_type: TransitionType::Warp,
+                                direction: "warp".to_string(),
+                            });
+                        }
+                    }
+                    self.step_count += 1;
+                }
+                GameEvent::None => {}
             }
         }
 
@@ -499,6 +633,14 @@ impl GameEngine {
 
         let npc_json = self.build_npc_json();
 
+        let transition_json = self.pending_transition.as_ref().map(|t| serde_json::json!({
+            "map": t.target_map,
+            "x": t.target_x,
+            "y": t.target_y,
+            "type": format!("{:?}", t.transition_type).to_lowercase(),
+            "direction": t.direction,
+        }));
+
         serde_json::json!({
             "player_x": self.state.player.x,
             "player_y": self.state.player.y,
@@ -511,6 +653,7 @@ impl GameEngine {
             "mode": format!("{:?}", self.state.mode),
             "npcs": npc_json,
             "trainer_spotted": self.trainer_spotted,
+            "transition": transition_json,
         })
         .to_string()
     }
@@ -978,12 +1121,144 @@ impl GameEngine {
             trainer_spotted: None,
             trainer_approach_timer: 0.0,
             action_consumed: false,
+            pending_transition: None,
+            rival_starter_id: 0,
         })
     }
 
     /// Set the player's name.
     pub fn set_player_name(&mut self, name: &str) {
         self.state.player.name = name.to_string();
+    }
+
+    /// Choose the player's starter sneaker.
+    /// choice 0 = Retro Runner, 1 = Tech Trainer, 2 = Skate Blazer
+    pub fn choose_starter(&mut self, choice: u8) {
+        use models::inventory::InventoryPocket;
+        use models::moves::MoveSlot;
+        use models::stats::{Stats, Condition};
+        use models::sneaker::SneakerInstance;
+
+        let (species_id, move1_id, move2_id): (u16, u16, u16) = match choice {
+            0 => (1,  5,  11), // Retro Runner: Stomp, Crease
+            1 => (9,  4,  20), // Tech Trainer: Quick Step, Shock Drop
+            2 => (17, 5,  27), // Skate Blazer: Stomp, Kickflip
+            _ => return,
+        };
+
+        // Rival Flip picks the counter-type
+        let rival_id: u16 = match choice {
+            0 => 9,  // Retro → rival has Tech Trainer
+            1 => 17, // Tech  → rival has Skate Blazer
+            2 => 1,  // Skate → rival has Retro Runner
+            _ => return,
+        };
+
+        let species = data::get_species(species_id);
+        let level: u8 = 5;
+
+        // Neutral IVs for the starter
+        let ivs = Stats { durability: 15, hype: 15, comfort: 15, drip: 15, rarity: 15 };
+
+        // Calculate max HP
+        let base_hp = species.base_stats.durability as u32;
+        let iv_hp   = ivs.durability as u32;
+        let inner   = (2 * base_hp + iv_hp) * level as u32 / 100;
+        let max_hp  = (inner + level as u32 + 10) as u16;
+
+        let md1 = data::get_move(move1_id);
+        let md2 = data::get_move(move2_id);
+
+        let mut moves = [None, None, None, None];
+        moves[0] = Some(MoveSlot { move_id: move1_id, current_pp: md1.pp, max_pp: md1.pp });
+        moves[1] = Some(MoveSlot { move_id: move2_id, current_pp: md2.pp, max_pp: md2.pp });
+
+        let uid = self.rng.next_u64();
+
+        let starter = SneakerInstance {
+            uid,
+            species_id,
+            nickname: None,
+            level,
+            xp: 0,
+            current_hp: max_hp,
+            max_hp,
+            ivs,
+            evs: Stats::zero(),
+            condition: Condition::Deadstock,
+            moves,
+            status: None,
+            on_fire_turns: 0,
+            held_item: None,
+            friendship: 70,
+            caught_location: 0,
+            original_trainer: self.state.player.name.clone(),
+        };
+
+        self.state.player.party.push(starter);
+
+        // Starting money and items
+        self.state.player.money = 500;
+        self.state.player.bag.add_item(1,  5, InventoryPocket::HealItems);    // 5x Sole Sauce
+        self.state.player.bag.add_item(30, 5, InventoryPocket::SneakerCases); // 5x Sneaker Case
+
+        // Mark starter as caught in Sneakerdex
+        let dex_idx = (species_id as usize).saturating_sub(1);
+        if dex_idx < self.state.player.sneakerdex.entries.len() {
+            self.state.player.sneakerdex.entries[dex_idx].seen   = true;
+            self.state.player.sneakerdex.entries[dex_idx].caught = true;
+        }
+
+        // Store rival species and set flag
+        self.rival_starter_id = rival_id;
+        self.state.event_flags.insert("has_starter".to_string());
+    }
+
+    /// Get the rival's starter species ID (set after choose_starter is called).
+    pub fn get_rival_starter_id(&self) -> u16 {
+        self.rival_starter_id
+    }
+
+    /// Start the rival Flip battle. Uses the counter-type starter at Lv.7.
+    pub fn start_rival_battle(&mut self) {
+        let rival_species_id = if self.rival_starter_id != 0 { self.rival_starter_id } else { 9 };
+        let rival_sneaker = generate_wild_sneaker(rival_species_id, 7, &mut self.rng);
+        let battle_state = BattleState {
+            kind: BattleKind::Trainer { id: 999, name: "Flip".to_string() },
+            player_active: 0,
+            opponent: BattleOpponent {
+                team: vec![rival_sneaker],
+                items: vec![],
+                ai_level: AiLevel::Basic,
+            },
+            opponent_active: 0,
+            turn_number: 0,
+            player_stages: Default::default(),
+            opponent_stages: Default::default(),
+            turn_log: vec![],
+            flee_attempts: 0,
+            can_flee: false,
+            waiting_for: None,
+            player_skip_turn: false,
+            opponent_skip_turn: false,
+        };
+        self.battle = Some(battle_state);
+        self.state.mode = GameMode::Battle;
+        self.state.event_flags.insert("route1_rival_battled".to_string());
+    }
+
+    /// Get the current pending map transition as JSON, or null if none.
+    pub fn get_pending_transition(&self) -> String {
+        match &self.pending_transition {
+            Some(t) => serde_json::json!({
+                "map": t.target_map,
+                "x": t.target_x,
+                "y": t.target_y,
+                "type": format!("{:?}", t.transition_type).to_lowercase(),
+                "direction": t.direction,
+            }).to_string(),
+            None => "null".to_string(),
+        }
     }
 
     /// Use an item on a party member in the overworld.
@@ -1269,6 +1544,37 @@ impl GameEngine {
         self.map_width = map_data.width as usize;
         self.map_height = map_data.height as usize;
         self.map = map_data.collision.clone();
+
+        // Apply pending transition: position player at the correct entry point
+        if let Some(trans) = self.pending_transition.take() {
+            match trans.direction.as_str() {
+                "north" => {
+                    // Entering from the south side of the new map
+                    self.state.player.y = (map_data.height as u16).saturating_sub(2);
+                    self.state.player.x = trans.target_x;
+                }
+                "south" => {
+                    // Entering from the north side of the new map
+                    self.state.player.y = 1;
+                    self.state.player.x = trans.target_x;
+                }
+                "east" => {
+                    // Entering from the west side of the new map
+                    self.state.player.x = 1;
+                    self.state.player.y = trans.target_y;
+                }
+                "west" => {
+                    // Entering from the east side of the new map
+                    self.state.player.x = (map_data.width as u16).saturating_sub(2);
+                    self.state.player.y = trans.target_y;
+                }
+                _ => {
+                    // Explicit warp coordinates
+                    self.state.player.x = trans.target_x;
+                    self.state.player.y = trans.target_y;
+                }
+            }
+        }
 
         // Initialize NPC runtime state from map definitions
         self.npcs = map_data.npcs.iter().map(|def| {
@@ -1706,6 +2012,307 @@ mod tests_phase_7 {
         assert_eq!(v["total_seen"], 2);
         assert_eq!(v["total_caught"], 1);
         assert_eq!(v["total_species"], 30);
+    }
+}
+
+// ── Phase 8 Tests ─────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests_phase_8 {
+    use super::*;
+    use crate::world::map::{MapConnections, MapData, WildEncounterEntry, EventDef};
+
+    // ── Helper: minimal map with a north connection ────────────────────────────
+
+    fn make_test_map_with_north_connection() -> MapData {
+        let w: u16 = 10;
+        let h: u16 = 8;
+        let mut collision = vec![0u8; (w * h) as usize];
+        // Border walls
+        for x in 0..w { collision[x as usize] = 1; collision[((h - 1) * w + x) as usize] = 1; }
+        for y in 0..h { collision[(y * w) as usize] = 1; collision[(y * w + w - 1) as usize] = 1; }
+        MapData {
+            id: "test_map".to_string(),
+            name: "Test Map".to_string(),
+            width: w, height: h,
+            collision,
+            ground: vec![0u16; (w * h) as usize],
+            overlay: vec![0u16; (w * h) as usize],
+            connections: MapConnections {
+                north: Some("route_1".to_string()),
+                south: None, east: None, west: None,
+            },
+            wild_encounters: vec![],
+            npcs: vec![],
+            events: vec![],
+            music: "test_bgm".to_string(),
+        }
+    }
+
+    fn make_test_map_no_connections() -> MapData {
+        let mut m = make_test_map_with_north_connection();
+        m.connections.north = None;
+        m
+    }
+
+    fn make_test_map_with_door() -> MapData {
+        let w: u16 = 10;
+        let h: u16 = 8;
+        let mut collision = vec![0u8; (w * h) as usize];
+        for x in 0..w { collision[x as usize] = 1; collision[((h - 1) * w + x) as usize] = 1; }
+        for y in 0..h { collision[(y * w) as usize] = 1; collision[(y * w + w - 1) as usize] = 1; }
+        // Door tile at (5, 4)
+        collision[4 * w as usize + 5] = 3;
+        MapData {
+            id: "test_door_map".to_string(),
+            name: "Test Door Map".to_string(),
+            width: w, height: h,
+            collision,
+            ground: vec![0u16; (w * h) as usize],
+            overlay: vec![0u16; (w * h) as usize],
+            connections: MapConnections {
+                north: None, south: None, east: None, west: None,
+            },
+            wild_encounters: vec![],
+            npcs: vec![],
+            events: vec![EventDef {
+                id: "lab_door".to_string(),
+                x: 5, y: 4,
+                event_type: "warp_trigger".to_string(),
+                data: "lab_interior:3:7".to_string(),
+            }],
+            music: "test_bgm".to_string(),
+        }
+    }
+
+    fn engine_on_map(map: MapData, player_x: u16, player_y: u16) -> GameEngine {
+        let mut eng = GameEngine::new(1);
+        eng.state.player.x = player_x;
+        eng.state.player.y = player_y;
+        eng.map_width = map.width as usize;
+        eng.map_height = map.height as usize;
+        eng.map = map.collision.clone();
+        eng.current_map = Some(map);
+        eng
+    }
+
+    // ── Map transitions ────────────────────────────────────────────────────────
+
+    #[test]
+    fn walk_off_north_edge_triggers_transition() {
+        let map = make_test_map_with_north_connection();
+        // Place player at y=1 (one tile from north border)
+        let mut eng = engine_on_map(map, 5, 1);
+
+        // Tick with "up" — target y=0 is solid border → edge transition
+        let json_str = eng.tick(16.67, "up");
+        let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert!(!v["transition"].is_null(), "should have a transition when walking off north edge");
+        assert_eq!(v["transition"]["map"], "route_1");
+    }
+
+    #[test]
+    fn walk_off_edge_no_connection_is_blocked() {
+        let map = make_test_map_no_connections();
+        let mut eng = engine_on_map(map, 5, 1);
+
+        let json_str = eng.tick(16.67, "up");
+        let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert!(v["transition"].is_null(), "should have no transition when no connection");
+        // Player should not move
+        assert_eq!(v["player_y"], 1);
+    }
+
+    #[test]
+    fn door_tile_triggers_fade_transition() {
+        let map = make_test_map_with_door();
+        // Place player at (5, 5) — above the door at (5, 4), move up
+        let mut eng = engine_on_map(map, 5, 5);
+
+        // Tick enough to complete the step onto the door tile
+        for i in 0..20 {
+            let input = if i == 0 { "up" } else { "none" };
+            eng.tick(16.67, input);
+            if !eng.state.player.moving && eng.state.player.y == 4 { break; }
+        }
+
+        // After stepping onto the door tile, transition should be pending
+        assert!(eng.pending_transition.is_some(), "pending transition should be set after door step");
+        let t = eng.pending_transition.as_ref().unwrap();
+        assert_eq!(t.target_map, "lab_interior");
+        assert_eq!(t.target_x, 3);
+        assert_eq!(t.target_y, 7);
+        use crate::world::map::TransitionType;
+        assert_eq!(t.transition_type, TransitionType::Fade);
+    }
+
+    #[test]
+    fn player_position_correct_after_transition() {
+        let mut eng = GameEngine::new(1);
+        // Simulate a pending north transition (player was at x=5 on old map)
+        use crate::world::map::TransitionType;
+        eng.pending_transition = Some(crate::world::map::MapTransition {
+            target_map: "route_1".to_string(),
+            target_x: 5,
+            target_y: 0,
+            transition_type: TransitionType::Walk,
+            direction: "north".to_string(),
+        });
+
+        // Load a new map — player should arrive at bottom (height-2)
+        let new_map = make_test_map_with_north_connection(); // h=8
+        let json = serde_json::to_string(&new_map).unwrap();
+        eng.load_map_from_json(&json).unwrap();
+
+        // After transition, pending_transition should be cleared
+        assert!(eng.pending_transition.is_none());
+        // Player x preserved, player y = height - 2 = 6
+        assert_eq!(eng.state.player.x, 5);
+        assert_eq!(eng.state.player.y, 6);
+    }
+
+    // ── Starter selection ─────────────────────────────────────────────────────
+
+    #[test]
+    fn choose_starter_0_gives_retro_runner_with_stomp_crease() {
+        let mut eng = GameEngine::new(42);
+        eng.choose_starter(0);
+        assert_eq!(eng.state.player.party.len(), 1);
+        let s = &eng.state.player.party[0];
+        assert_eq!(s.species_id, 1, "should be Retro Runner");
+        assert_eq!(s.level, 5);
+        let m0_id = s.moves[0].as_ref().map(|m| m.move_id);
+        let m1_id = s.moves[1].as_ref().map(|m| m.move_id);
+        assert_eq!(m0_id, Some(5),  "move 0 should be Stomp (id=5)");
+        assert_eq!(m1_id, Some(11), "move 1 should be Crease (id=11)");
+    }
+
+    #[test]
+    fn choose_starter_1_gives_tech_trainer_with_quick_step_shock_drop() {
+        let mut eng = GameEngine::new(42);
+        eng.choose_starter(1);
+        let s = &eng.state.player.party[0];
+        assert_eq!(s.species_id, 9, "should be Tech Trainer");
+        assert_eq!(s.level, 5);
+        let m0_id = s.moves[0].as_ref().map(|m| m.move_id);
+        let m1_id = s.moves[1].as_ref().map(|m| m.move_id);
+        assert_eq!(m0_id, Some(4),  "move 0 should be Quick Step (id=4)");
+        assert_eq!(m1_id, Some(20), "move 1 should be Shock Drop (id=20)");
+    }
+
+    #[test]
+    fn choose_starter_2_gives_skate_blazer_with_stomp_kickflip() {
+        let mut eng = GameEngine::new(42);
+        eng.choose_starter(2);
+        let s = &eng.state.player.party[0];
+        assert_eq!(s.species_id, 17, "should be Skate Blazer");
+        assert_eq!(s.level, 5);
+        let m0_id = s.moves[0].as_ref().map(|m| m.move_id);
+        let m1_id = s.moves[1].as_ref().map(|m| m.move_id);
+        assert_eq!(m0_id, Some(5),  "move 0 should be Stomp (id=5)");
+        assert_eq!(m1_id, Some(27), "move 1 should be Kickflip (id=27)");
+    }
+
+    #[test]
+    fn choose_starter_gives_500_money_and_items() {
+        let mut eng = GameEngine::new(42);
+        eng.choose_starter(0);
+        assert_eq!(eng.state.player.money, 500);
+        // 5x Sole Sauce (id=1)
+        let sauce_qty = eng.state.player.bag.heal_items.iter()
+            .find(|(id, _)| *id == 1)
+            .map(|(_, q)| *q)
+            .unwrap_or(0);
+        assert_eq!(sauce_qty, 5, "should have 5 Sole Sauce");
+        // 5x Sneaker Case (id=30)
+        let case_qty = eng.state.player.bag.sneaker_cases.iter()
+            .find(|(id, _)| *id == 30)
+            .map(|(_, q)| *q)
+            .unwrap_or(0);
+        assert_eq!(case_qty, 5, "should have 5 Sneaker Cases");
+    }
+
+    #[test]
+    fn choose_starter_marks_dex_as_caught() {
+        let mut eng = GameEngine::new(42);
+        eng.choose_starter(0); // Retro Runner = species_id 1, dex_idx 0
+        assert!(eng.state.player.sneakerdex.entries[0].seen);
+        assert!(eng.state.player.sneakerdex.entries[0].caught);
+    }
+
+    #[test]
+    fn choose_starter_sets_has_starter_flag() {
+        let mut eng = GameEngine::new(42);
+        eng.choose_starter(1);
+        assert!(eng.state.event_flags.contains("has_starter"));
+    }
+
+    // ── Rival team ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn player_chose_retro_rival_has_techwear() {
+        let mut eng = GameEngine::new(42);
+        eng.choose_starter(0); // Retro Runner
+        // Rival should be Tech Trainer (species_id=9, Techwear faction)
+        assert_eq!(eng.rival_starter_id, 9);
+        let species = crate::data::get_species(eng.rival_starter_id);
+        assert_eq!(species.faction, crate::models::Faction::Techwear);
+    }
+
+    #[test]
+    fn player_chose_techwear_rival_has_skate() {
+        let mut eng = GameEngine::new(42);
+        eng.choose_starter(1); // Tech Trainer
+        assert_eq!(eng.rival_starter_id, 17);
+        let species = crate::data::get_species(eng.rival_starter_id);
+        assert_eq!(species.faction, crate::models::Faction::Skate);
+    }
+
+    #[test]
+    fn player_chose_skate_rival_has_retro() {
+        let mut eng = GameEngine::new(42);
+        eng.choose_starter(2); // Skate Blazer
+        assert_eq!(eng.rival_starter_id, 1);
+        let species = crate::data::get_species(eng.rival_starter_id);
+        assert_eq!(species.faction, crate::models::Faction::Retro);
+    }
+
+    #[test]
+    fn rival_battle_uses_level_7() {
+        let mut eng = GameEngine::new(42);
+        eng.choose_starter(0);
+        eng.start_rival_battle();
+        assert!(eng.battle.is_some());
+        let battle = eng.battle.as_ref().unwrap();
+        assert_eq!(battle.opponent.team[0].species_id, 9); // Tech Trainer
+        assert_eq!(battle.opponent.team[0].level, 7);
+    }
+
+    // ── Integration ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn save_after_starter_load_party_intact() {
+        let mut eng = GameEngine::new(42);
+        eng.choose_starter(0);
+        let json = eng.export_save();
+        let loaded = GameEngine::load_save(&json).expect("load_save failed");
+        assert_eq!(loaded.state.player.party.len(), 1);
+        assert_eq!(loaded.state.player.party[0].species_id, 1);
+        assert_eq!(loaded.state.player.money, 500);
+        assert!(loaded.state.event_flags.contains("has_starter"));
+    }
+
+    #[test]
+    fn walk_off_north_edge_blocked_from_battle_mode() {
+        // In battle mode, edge transition should not trigger
+        let map = make_test_map_with_north_connection();
+        let mut eng = engine_on_map(map, 5, 1);
+        eng.state.mode = GameMode::Battle;
+
+        let json_str = eng.tick(16.67, "up");
+        let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        // Battle mode returns early, no transition
+        assert!(v["transition"].is_null(), "no transition in battle mode");
     }
 }
 

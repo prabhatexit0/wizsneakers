@@ -1,0 +1,47 @@
+[
+  {
+    "id": 1,
+    "name": "Hypebeast Jake",
+    "class": "Hypebeast",
+    "team": [
+      { "species_id": 4, "level": 4, "moves": null, "held_item": null }
+    ],
+    "items": [],
+    "ai_level": 0,
+    "reward_money": 200,
+    "sight_range": 3,
+    "pre_battle_dialogue": "trainer_jake_pre",
+    "post_battle_dialogue": "trainer_jake_post",
+    "defeated_dialogue": "trainer_jake_post"
+  },
+  {
+    "id": 2,
+    "name": "Skater Kid Sam",
+    "class": "SkaterKid",
+    "team": [
+      { "species_id": 20, "level": 5, "moves": null, "held_item": null }
+    ],
+    "items": [],
+    "ai_level": 0,
+    "reward_money": 250,
+    "sight_range": 3,
+    "pre_battle_dialogue": "trainer_sam_pre",
+    "post_battle_dialogue": "trainer_sam_post",
+    "defeated_dialogue": "trainer_sam_post"
+  },
+  {
+    "id": 3,
+    "name": "Tech Nerd Mia",
+    "class": "TechNerd",
+    "team": [
+      { "species_id": 12, "level": 5, "moves": null, "held_item": null }
+    ],
+    "items": [],
+    "ai_level": 0,
+    "reward_money": 250,
+    "sight_range": 3,
+    "pre_battle_dialogue": "trainer_mia_pre",
+    "post_battle_dialogue": "trainer_mia_post",
+    "defeated_dialogue": "trainer_mia_post"
+  }
+]

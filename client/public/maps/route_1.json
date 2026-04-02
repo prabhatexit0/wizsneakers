@@ -54,19 +54,21 @@
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
   ],
-  "connections": {
-    "north": null,
-    "south": "boxfresh_town",
-    "east": null,
-    "west": null
-  },
+  "connections": {"north": "laceup_village", "south": "boxfresh_town", "east": null, "west": null},
   "wild_encounters": [
     {"species_id": 4,  "level_min": 3, "level_max": 5, "weight": 40},
     {"species_id": 20, "level_min": 3, "level_max": 5, "weight": 35},
     {"species_id": 12, "level_min": 4, "level_max": 6, "weight": 15},
     {"species_id": 1,  "level_min": 4, "level_max": 6, "weight": 10}
   ],
-  "npcs": [],
-  "events": [],
+  "npcs": [
+    {"id": "trainer_jake", "x": 25, "y": 3, "facing": "down", "sprite": "trainer_hypebeast", "movement": {"type": "Stationary"}, "dialogue_id": "trainer_jake_pre", "is_trainer": true, "sight_range": 3, "trainer_id": 1, "defeated_flag": "trainer_jake_defeated"},
+    {"id": "trainer_sam", "x": 25, "y": 7, "facing": "left", "sprite": "trainer_skater", "movement": {"type": "Stationary"}, "dialogue_id": "trainer_sam_pre", "is_trainer": true, "sight_range": 3, "trainer_id": 2, "defeated_flag": "trainer_sam_defeated"},
+    {"id": "trainer_mia", "x": 25, "y": 11, "facing": "right", "sprite": "trainer_tech", "movement": {"type": "Stationary"}, "dialogue_id": "trainer_mia_pre", "is_trainer": true, "sight_range": 3, "trainer_id": 3, "defeated_flag": "trainer_mia_defeated"}
+  ],
+  "events": [
+    {"id": "item_sole_sauce", "x": 10, "y": 5, "event_type": "item_pickup", "data": "1:1"},
+    {"id": "item_sneaker_case", "x": 38, "y": 8, "event_type": "item_pickup", "data": "30:1"}
+  ],
   "music": "route_1_bgm"
 }

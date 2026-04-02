@@ -1,0 +1,46 @@
+{
+  "id": "laceup_interior_shop",
+  "name": "Retro Rick's",
+  "width": 10,
+  "height": 8,
+  "collision": [
+    1,1,1,1,1,1,1,1,1,1,
+    1,0,0,0,0,0,0,0,0,1,
+    1,0,0,0,0,0,0,0,0,1,
+    1,0,0,0,0,0,0,0,0,1,
+    1,0,0,0,0,0,0,0,0,1,
+    1,0,0,0,0,0,0,0,0,1,
+    1,0,0,0,0,0,0,0,0,1,
+    1,1,1,1,1,3,1,1,1,1
+  ],
+  "ground": [
+    0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0
+  ],
+  "overlay": [
+    0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0
+  ],
+  "connections": {"north": null, "south": null, "east": null, "west": null},
+  "wild_encounters": [],
+  "npcs": [
+    {"id": "npc_retro_rick", "x": 5, "y": 2, "facing": "down", "sprite": "npc_old_man", "movement": {"type": "Stationary"}, "dialogue_id": "retro_rick_intro", "is_trainer": false, "sight_range": 0, "trainer_id": 0}
+  ],
+  "events": [
+    {"id": "ev_shop_exit", "x": 5, "y": 7, "event_type": "warp_trigger", "data": "laceup_village:32:9"},
+    {"id": "ev_shop", "x": 5, "y": 3, "event_type": "shop", "data": "retro_ricks_shop"}
+  ],
+  "music": "laceup_village_bgm"
+}

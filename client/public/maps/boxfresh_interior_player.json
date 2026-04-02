@@ -1,0 +1,45 @@
+{
+  "id": "boxfresh_interior_player",
+  "name": "Player's House",
+  "width": 10,
+  "height": 8,
+  "collision": [
+    1,1,1,1,1,1,1,1,1,1,
+    1,0,0,0,0,0,0,0,0,1,
+    1,0,0,0,0,0,0,0,0,1,
+    1,0,0,0,0,0,0,0,0,1,
+    1,0,0,0,0,0,0,0,0,1,
+    1,0,0,0,0,0,0,0,0,1,
+    1,0,0,0,0,0,0,0,0,1,
+    1,1,1,1,3,1,1,1,1,1
+  ],
+  "ground": [
+    0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0
+  ],
+  "overlay": [
+    0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0
+  ],
+  "connections": {"north": null, "south": null, "east": null, "west": null},
+  "wild_encounters": [],
+  "npcs": [
+    {"id": "npc_mom_interior", "x": 5, "y": 3, "facing": "down", "sprite": "npc_mom", "movement": {"type": "Stationary"}, "dialogue_id": "mom_intro", "is_trainer": false, "sight_range": 0, "trainer_id": 0}
+  ],
+  "events": [
+    {"id": "ev_player_house_exit", "x": 4, "y": 7, "event_type": "warp_trigger", "data": "boxfresh_town:4:7"}
+  ],
+  "music": "boxfresh_town_bgm"
+}

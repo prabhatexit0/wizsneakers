@@ -17,12 +17,15 @@ import { BattleScreen } from './components/battle/BattleScreen'
 import { DialogueBox } from './components/DialogueBox'
 import { TitleScreen } from './components/TitleScreen'
 import { PauseMenu } from './components/menu/PauseMenu'
+import { TransitionOverlay } from './components/TransitionOverlay'
+import { NameEntryScreen } from './components/NameEntryScreen'
 import type { DialoguePage } from './components/DialogueBox'
+import type { MapTransitionInfo } from './hooks/useWasm'
 import { autoSave } from './state/saveLoad'
 import init, { GameEngine } from './wasm/wizsneakers_engine.js'
 
 type Facing = 'up' | 'down' | 'left' | 'right'
-type AppState = 'title' | 'game'
+type AppState = 'title' | 'name_entry' | 'game'
 
 interface NpcRenderInfo {
   id: string
@@ -36,7 +39,8 @@ interface NpcRenderInfo {
 let charSheet: HTMLCanvasElement | null = null
 
 function App() {
-  const { engine, ready, error } = useWasm()
+  const { engine, ready, error, pendingTransition, setPendingTransition, handleTransition } = useWasm()
+  const activeTransitionRef = useRef<MapTransitionInfo | null>(null)
   const inputRef = useInput()
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [encounter, setEncounter] = useState(false)
@@ -144,6 +148,13 @@ function App() {
         npcs?: NpcRenderInfo[]
         trainer_spotted?: string | null
         dialogue_page?: DialoguePage | null
+        transition?: MapTransitionInfo | null
+      }
+
+      // Handle map transition from engine
+      if (state.transition && !activeTransitionRef.current) {
+        activeTransitionRef.current = state.transition
+        setPendingTransition(state.transition)
       }
 
       if (state.encounter) {
@@ -211,15 +222,25 @@ function App() {
     return <div style={{ padding: 40, fontFamily: '"Courier New", monospace' }}>Loading engine...</div>
   }
 
+  if (appState === 'name_entry') {
+    return (
+      <NameEntryScreen
+        onConfirm={(name) => {
+          const eng = engine.current
+          if (!eng) return
+          eng.set_player_name(name)
+          setAppState('game')
+        }}
+      />
+    )
+  }
+
   if (appState === 'title') {
     return (
       <TitleScreen
-        onNewGame={(name) => {
-          const eng = engine.current
-          if (!eng) return
-          const anyEng = eng as unknown as Record<string, (n: string) => void>
-          anyEng['set_player_name'](name)
-          setAppState('game')
+        onNewGame={(_name) => {
+          // Show name entry screen instead of using the title screen's name field
+          setAppState('name_entry')
         }}
         onContinue={(saveData) => {
           // Load save using static method
@@ -377,6 +398,18 @@ function App() {
         <PauseMenu
           engine={eng}
           onClose={() => setPauseOpen(false)}
+        />
+      )}
+
+      {/* Map transition overlay */}
+      {pendingTransition && (
+        <TransitionOverlay
+          type={pendingTransition.type}
+          onComplete={() => {
+            handleTransition(pendingTransition).then(() => {
+              activeTransitionRef.current = null
+            })
+          }}
         />
       )}
     </div>

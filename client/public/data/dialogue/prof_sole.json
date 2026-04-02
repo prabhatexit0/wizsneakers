@@ -52,7 +52,57 @@
       },
       {
         "speaker": "Prof. Sole",
-        "text": "Your rival {rival_name} already chose their starter. Head north through Route 1 when you're ready!",
+        "text": "Oh! And before I forget — take this Sneakerdex. It records data on every Sneaker you encounter.",
+        "choices": null
+      },
+      {
+        "speaker": "Prof. Sole",
+        "text": "Head north through Route 1 to reach Lace-Up Village. Your adventure begins now!",
+        "choices": null
+      }
+    ]
+  },
+  {
+    "id": "flip_pre_battle",
+    "pages": [
+      {
+        "speaker": "Flip",
+        "text": "I already know my kicks are fresher than yours. Let's prove it!",
+        "choices": null
+      }
+    ]
+  },
+  {
+    "id": "flip_post_win",
+    "pages": [
+      {
+        "speaker": "Flip",
+        "text": "Okay okay, you got lucky. But I'm going to be WAY ahead of you next time.",
+        "choices": null
+      }
+    ]
+  },
+  {
+    "id": "flip_post_lose",
+    "pages": [
+      {
+        "speaker": "Flip",
+        "text": "Heh! Like I said. Your kicks can't match mine. See you on the road, rookie!",
+        "choices": null
+      }
+    ]
+  },
+  {
+    "id": "prof_sole_post_game",
+    "pages": [
+      {
+        "speaker": "Prof. Sole",
+        "text": "Incredible work, {player_name}! You've authenticated all 8 Grail sneakers.",
+        "choices": null
+      },
+      {
+        "speaker": "Prof. Sole",
+        "text": "You are truly the greatest Sneaker trainer the world has ever known!",
         "choices": null
       }
     ]

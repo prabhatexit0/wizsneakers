@@ -116,5 +116,28 @@
         "choices": null
       }
     ]
+  },
+  {
+    "id": "mom_heal",
+    "pages": [
+      {
+        "speaker": "Mom",
+        "text": "Let me take a look at those sneakers... There! Good as new!",
+        "choices": null
+      }
+    ]
+  },
+  {
+    "id": "mom_heal_offer",
+    "pages": [
+      {
+        "speaker": "Mom",
+        "text": "Welcome home, {player_name}! Want me to heal your sneakers?",
+        "choices": [
+          { "text": "Yes please!", "next_dialogue": "mom_heal", "set_flag": null, "action": "heal_party" },
+          { "text": "Not right now.", "next_dialogue": null, "set_flag": null, "action": null }
+        ]
+      }
+    ]
   }
 ]
