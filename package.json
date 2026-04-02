@@ -1,0 +1,9 @@
+{
+  "name": "wizsneakers",
+  "private": true,
+  "scripts": {
+    "build:engine": "cd engine && wasm-pack build --target web --out-dir ../client/src/wasm",
+    "dev": "pnpm run build:engine && cd client && pnpm run dev",
+    "build": "pnpm run build:engine && cd client && pnpm run build"
+  }
+}
