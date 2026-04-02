@@ -1,12 +1,16 @@
 use wasm_bindgen::prelude::*;
-use serde::Serialize;
 
 pub mod models;
 pub mod util;
 pub mod data;
+pub mod state;
 
 // Re-export commonly used types
 pub use models::{Faction, Stats};
+pub use state::{GameState, GameMode};
+pub use util::rng::SeededRng;
+
+use state::player::Direction;
 
 // ── Tile types ──
 
@@ -17,11 +21,12 @@ const MAP_HEIGHT: usize = 15;
 
 #[wasm_bindgen]
 pub struct GameEngine {
-    player_x: usize,
-    player_y: usize,
+    state: GameState,
+    rng: SeededRng,
     map: Vec<u8>, // 0=floor, 1=wall, 2=tall_grass
     map_width: usize,
     map_height: usize,
+    // Transient per-tick state (not persisted to GameState yet — PRD 04+)
     step_count: u32,
     encounter_triggered: bool,
 }
@@ -29,7 +34,7 @@ pub struct GameEngine {
 #[wasm_bindgen]
 impl GameEngine {
     #[wasm_bindgen(constructor)]
-    pub fn new() -> Self {
+    pub fn new(seed: u64) -> Self {
         let mut map = vec![0u8; MAP_WIDTH * MAP_HEIGHT];
 
         // Border walls
@@ -63,8 +68,8 @@ impl GameEngine {
         }
 
         Self {
-            player_x: 3,
-            player_y: 3,
+            state: GameState::new(),
+            rng: SeededRng::new(seed),
             map,
             map_width: MAP_WIDTH,
             map_height: MAP_HEIGHT,
@@ -77,16 +82,24 @@ impl GameEngine {
     pub fn tick(&mut self, direction: u8) {
         self.encounter_triggered = false;
 
-        let (dx, dy): (isize, isize) = match direction {
-            1 => (0, -1),  // up
-            2 => (0, 1),   // down
-            3 => (-1, 0),  // left
-            4 => (1, 0),   // right
-            _ => return,
+        let opt_dir = match direction {
+            1 => Some(Direction::Up),
+            2 => Some(Direction::Down),
+            3 => Some(Direction::Left),
+            4 => Some(Direction::Right),
+            _ => None,
         };
 
-        let nx = self.player_x as isize + dx;
-        let ny = self.player_y as isize + dy;
+        let dir = match opt_dir {
+            Some(d) => d,
+            None => return,
+        };
+
+        let (dx, dy) = dir.delta();
+        self.state.player.facing = dir;
+
+        let nx = self.state.player.x as isize + dx;
+        let ny = self.state.player.y as isize + dy;
 
         if nx < 0 || ny < 0 || nx >= self.map_width as isize || ny >= self.map_height as isize {
             return;
@@ -95,19 +108,17 @@ impl GameEngine {
         let (nx, ny) = (nx as usize, ny as usize);
         let tile = self.map[ny * self.map_width + nx];
 
-        // Wall collision
         if tile == 1 {
             return;
         }
 
-        self.player_x = nx;
-        self.player_y = ny;
+        self.state.player.x = nx as u16;
+        self.state.player.y = ny as u16;
         self.step_count += 1;
 
-        // Tall grass encounter check (~15% chance)
+        // Tall grass encounter check (~15% chance) using SeededRng
         if tile == 2 {
-            let pseudo_rand = (self.step_count.wrapping_mul(2654435761)) % 100;
-            if pseudo_rand < 15 {
+            if self.rng.chance(15) {
                 self.encounter_triggered = true;
             }
         }
@@ -115,8 +126,8 @@ impl GameEngine {
 
     // ── Getters for JS ──
 
-    pub fn player_x(&self) -> usize { self.player_x }
-    pub fn player_y(&self) -> usize { self.player_y }
+    pub fn player_x(&self) -> usize { self.state.player.x as usize }
+    pub fn player_y(&self) -> usize { self.state.player.y as usize }
     pub fn map_width(&self) -> usize { self.map_width }
     pub fn map_height(&self) -> usize { self.map_height }
     pub fn step_count(&self) -> u32 { self.step_count }
@@ -133,12 +144,15 @@ impl GameEngine {
     /// Get state as JSON for UI overlays
     pub fn state_json(&self) -> String {
         serde_json::json!({
-            "player_x": self.player_x,
-            "player_y": self.player_y,
+            "player_x": self.state.player.x,
+            "player_y": self.state.player.y,
             "step_count": self.step_count,
             "encounter": self.encounter_triggered,
             "map_width": self.map_width,
             "map_height": self.map_height,
+            "mode": format!("{:?}", self.state.mode),
+            "money": self.state.player.money,
+            "story_progress": self.state.story_progress,
         })
         .to_string()
     }

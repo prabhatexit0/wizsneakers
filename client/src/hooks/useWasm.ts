@@ -15,7 +15,7 @@ export function useWasm() {
       try {
         await init()
         if (cancelled) return
-        engineRef.current = new GameEngine()
+        engineRef.current = new GameEngine(BigInt(Date.now()))
         setReady(true)
       } catch (e) {
         if (!cancelled) setError(String(e))
