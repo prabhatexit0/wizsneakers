@@ -1,0 +1,60 @@
+[
+  {
+    "id": "prof_sole_intro",
+    "pages": [
+      {
+        "speaker": "Prof. Sole",
+        "text": "Welcome, {player_name}! I am Professor Sole, the world's foremost expert on Sneaker culture.",
+        "choices": null
+      },
+      {
+        "speaker": "Prof. Sole",
+        "text": "This world is inhabited by creatures called Sneakers! Some collect them as a hobby...",
+        "choices": null
+      },
+      {
+        "speaker": "Prof. Sole",
+        "text": "Others use them for battle. Myself — I study them professionally. Now, are you ready to choose your first partner?",
+        "choices": [
+          {
+            "text": "Yes! I'm ready!",
+            "next_dialogue": "prof_sole_starter_choice",
+            "set_flag": "prof_intro_done",
+            "action": null
+          },
+          {
+            "text": "Not yet...",
+            "next_dialogue": null,
+            "set_flag": null,
+            "action": null
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "prof_sole_starter_choice",
+    "pages": [
+      {
+        "speaker": "Prof. Sole",
+        "text": "Excellent! Three Sneakers await you. Each has its own Faction and personality. Choose wisely — your journey begins here!",
+        "choices": null
+      }
+    ]
+  },
+  {
+    "id": "prof_sole_after_choice",
+    "pages": [
+      {
+        "speaker": "Prof. Sole",
+        "text": "A fine choice, {player_name}! Take good care of your new partner.",
+        "choices": null
+      },
+      {
+        "speaker": "Prof. Sole",
+        "text": "Your rival {rival_name} already chose their starter. Head north through Route 1 when you're ready!",
+        "choices": null
+      }
+    ]
+  }
+]

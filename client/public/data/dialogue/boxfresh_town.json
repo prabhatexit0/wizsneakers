@@ -1,0 +1,120 @@
+[
+  {
+    "id": "mom_intro",
+    "pages": [
+      {
+        "speaker": "Mom",
+        "text": "Good morning, {player_name}! Today's the day you get your first Sneaker from Professor Sole.",
+        "choices": null
+      },
+      {
+        "speaker": "Mom",
+        "text": "Be careful out there. And don't forget to come back and visit!",
+        "choices": null
+      }
+    ]
+  },
+  {
+    "id": "mom_after_starter",
+    "pages": [
+      {
+        "speaker": "Mom",
+        "text": "You got your first Sneaker! I'm so proud of you, {player_name}.",
+        "choices": null
+      },
+      {
+        "speaker": "Mom",
+        "text": "Your rival {rival_name} already ran ahead. Don't let them get too far!",
+        "choices": null
+      }
+    ]
+  },
+  {
+    "id": "tutorial_npc_controls",
+    "pages": [
+      {
+        "speaker": "Trainer",
+        "text": "Hey there! New to Sneaker battling? Use Arrow Keys or WASD to move around.",
+        "choices": null
+      },
+      {
+        "speaker": "Trainer",
+        "text": "Press Z or Enter to interact with things. X to cancel. Escape for the menu.",
+        "choices": null
+      },
+      {
+        "speaker": "Trainer",
+        "text": "Hold Shift to sprint! Good luck on your journey.",
+        "choices": null
+      }
+    ]
+  },
+  {
+    "id": "tutorial_npc_types",
+    "pages": [
+      {
+        "speaker": "Sneaker Fan",
+        "text": "Did you know Sneakers have different Factions? Each Faction has strengths and weaknesses.",
+        "choices": null
+      },
+      {
+        "speaker": "Sneaker Fan",
+        "text": "For example, Drip-type moves are super effective against Heat-types! Learn the matchups!",
+        "choices": null
+      }
+    ]
+  },
+  {
+    "id": "npc_old_man",
+    "pages": [
+      {
+        "speaker": "Old Man",
+        "text": "Back in my day, we only had one Sneaker and we liked it!",
+        "choices": null
+      }
+    ]
+  },
+  {
+    "id": "npc_kid",
+    "pages": [
+      {
+        "speaker": "Kid",
+        "text": "I heard Professor Sole has THREE starter Sneakers to choose from!",
+        "choices": [
+          {
+            "text": "Really? That's amazing!",
+            "next_dialogue": "npc_kid_excited",
+            "set_flag": null,
+            "action": null
+          },
+          {
+            "text": "I already know which one I want.",
+            "next_dialogue": null,
+            "set_flag": null,
+            "action": null
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "npc_kid_excited",
+    "pages": [
+      {
+        "speaker": "Kid",
+        "text": "I want the rarest one! Someday I'll be the greatest Sneaker trainer ever!",
+        "choices": null
+      }
+    ]
+  },
+  {
+    "id": "sign_town",
+    "pages": [
+      {
+        "speaker": null,
+        "text": "BOXFRESH TOWN — A Fragrant Place to Start!",
+        "choices": null
+      }
+    ]
+  }
+]

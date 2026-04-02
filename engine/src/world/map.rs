@@ -16,16 +16,60 @@ pub struct WildEncounterEntry {
     pub weight: u32,
 }
 
-/// Stub — will be expanded in Phase 6
+/// NPC movement pattern — used in both map definition (JSON) and runtime state
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct NpcDef {
-    pub id: u16,
+#[serde(tag = "type")]
+pub enum NpcMovement {
+    Stationary,
+    RandomWalk { radius: u8 },
+    Patrol { path: Vec<(u16, u16)> },
+    FacePlayer,
 }
 
-/// Stub — will be expanded in Phase 6
+/// NPC definition as loaded from map JSON
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NpcDef {
+    pub id: String,
+    pub x: u16,
+    pub y: u16,
+    #[serde(default = "default_facing")]
+    pub facing: String,
+    #[serde(default)]
+    pub sprite: String,
+    #[serde(default = "default_movement")]
+    pub movement: NpcMovement,
+    #[serde(default)]
+    pub dialogue_id: String,
+    #[serde(default)]
+    pub is_trainer: bool,
+    #[serde(default)]
+    pub sight_range: u8,
+    #[serde(default)]
+    pub trainer_id: u16,
+    #[serde(default)]
+    pub defeated_flag: Option<String>,
+}
+
+fn default_facing() -> String {
+    "down".to_string()
+}
+
+fn default_movement() -> NpcMovement {
+    NpcMovement::Stationary
+}
+
+/// Map event definition as loaded from map JSON
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EventDef {
-    pub id: u16,
+    pub id: String,
+    pub x: u16,
+    pub y: u16,
+    /// Type: "sign", "shop", "heal", "sneaker_box", "warp_trigger", etc.
+    #[serde(default)]
+    pub event_type: String,
+    /// Event data: sign text, shop id, target map, etc.
+    #[serde(default)]
+    pub data: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

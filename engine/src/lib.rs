@@ -1,4 +1,5 @@
 use wasm_bindgen::prelude::*;
+use std::collections::HashMap;
 
 pub mod models;
 pub mod util;
@@ -16,8 +17,11 @@ use state::player::Direction;
 use world::map::MapData;
 use world::movement::{parse_input, process_movement, GameEvent};
 use world::encounters::generate_wild_sneaker;
+use world::dialogue::{DialogueData, DialogueState};
+use world::npc::{NpcState, TrainerNpcData, tick_npcs, check_trainer_triggers};
+use world::events::{interact as do_interact, InteractionResult};
 use battle::{BattleEngine, BattleState, BattleAction, BattleTurnEvent, BattleResult, BattleKind};
-use battle::types::{BattlePrompt};
+use battle::types::{BattlePrompt, BattleOpponent, AiLevel};
 use models::sneaker::xp_needed;
 
 // ── Tile types ──
@@ -38,6 +42,18 @@ pub struct GameEngine {
     step_count: u32,
     encounter_triggered: bool,
     pub(crate) battle: Option<BattleState>,
+    /// Active NPC runtime states
+    pub(crate) npcs: Vec<NpcState>,
+    /// Active dialogue session
+    pub(crate) dialogue_state: Option<DialogueState>,
+    /// In-memory dialogue database loaded from JSON
+    pub(crate) dialogue_db: HashMap<String, DialogueData>,
+    /// NPC id of a trainer that has spotted the player (approach in progress)
+    trainer_spotted: Option<String>,
+    /// Timer for trainer approach sequence (ms)
+    trainer_approach_timer: f64,
+    /// Deduplicate action key presses (prevent holding from spamming)
+    action_consumed: bool,
 }
 
 #[wasm_bindgen]
@@ -86,12 +102,157 @@ impl GameEngine {
             step_count: 0,
             encounter_triggered: false,
             battle: None,
+            npcs: Vec::new(),
+            dialogue_state: None,
+            dialogue_db: HashMap::new(),
+            trainer_spotted: None,
+            trainer_approach_timer: 0.0,
+            action_consumed: false,
         }
     }
 
     /// Load map data from a JSON string. Updates collision, dimensions, and encounter table.
     pub fn load_map_data(&mut self, json: &str) -> Result<(), JsValue> {
         self.load_map_from_json(json).map_err(|e| JsValue::from_str(&e))
+    }
+
+    /// Load dialogue data from a JSON array string.
+    /// Format: `[{"id": "...", "pages": [...]}, ...]`
+    pub fn load_dialogue_data(&mut self, json: &str) -> Result<(), JsValue> {
+        self.load_dialogue_json(json).map_err(|e| JsValue::from_str(&e))
+    }
+
+    /// Trigger interaction with what is in front of the player.
+    /// Returns JSON: {"type": "dialogue"|"sign"|"shop"|"heal"|"sneaker_box"|"none", ...}
+    pub fn interact(&mut self) -> String {
+        let (px, py) = (self.state.player.x, self.state.player.y);
+        let (fdx, fdy) = self.state.player.facing.delta();
+
+        let events_defs = self.current_map
+            .as_ref()
+            .map(|m| m.events.as_slice())
+            .unwrap_or(&[]);
+
+        let result = do_interact(px, py, fdx, fdy, &self.npcs, events_defs, &self.dialogue_db);
+
+        match result {
+            Some(InteractionResult::Dialogue(data)) => {
+                let page = data.pages.first().cloned();
+                let page_json = page.map(|p| self.page_to_json_with_replacements(&p));
+                let page_json = page_json.unwrap_or(serde_json::Value::Null);
+                self.dialogue_state = Some(DialogueState::new(data));
+                self.state.mode = GameMode::Dialogue;
+                serde_json::json!({
+                    "type": "dialogue",
+                    "page": page_json,
+                }).to_string()
+            }
+            Some(InteractionResult::Sign(text)) => {
+                serde_json::json!({
+                    "type": "sign",
+                    "text": text,
+                }).to_string()
+            }
+            Some(InteractionResult::Shop(shop_id)) => {
+                serde_json::json!({
+                    "type": "shop",
+                    "shop_id": shop_id,
+                }).to_string()
+            }
+            Some(InteractionResult::Heal) => {
+                serde_json::json!({ "type": "heal" }).to_string()
+            }
+            Some(InteractionResult::SneakerBox) => {
+                serde_json::json!({ "type": "sneaker_box" }).to_string()
+            }
+            None => {
+                serde_json::json!({ "type": "none" }).to_string()
+            }
+        }
+    }
+
+    /// Advance to the next dialogue page.
+    /// Returns JSON: {"status": "continue"|"end", "page": {...}}
+    pub fn advance_dialogue(&mut self) -> String {
+        let ds = match self.dialogue_state.as_mut() {
+            Some(s) => s,
+            None => return serde_json::json!({"status": "end"}).to_string(),
+        };
+
+        if ds.advance() {
+            let page = ds.current().cloned();
+            let page_json = page.map(|p| self.page_to_json_with_replacements(&p));
+            serde_json::json!({
+                "status": "continue",
+                "page": page_json.unwrap_or(serde_json::Value::Null),
+            }).to_string()
+        } else {
+            // End of dialogue
+            self.dialogue_state = None;
+            self.state.mode = GameMode::Overworld;
+            serde_json::json!({"status": "end"}).to_string()
+        }
+    }
+
+    /// Select a dialogue choice by index.
+    /// Returns JSON: {"status": "continue"|"end", "page": {...}}
+    pub fn select_choice(&mut self, index: u8) -> String {
+        let choice = {
+            let ds = match self.dialogue_state.as_ref() {
+                Some(s) => s,
+                None => return serde_json::json!({"status": "end"}).to_string(),
+            };
+            let page = match ds.current() {
+                Some(p) => p,
+                None => return serde_json::json!({"status": "end"}).to_string(),
+            };
+            let choices = match &page.choices {
+                Some(c) => c,
+                None => return serde_json::json!({"status": "end"}).to_string(),
+            };
+            choices.get(index as usize).cloned()
+        };
+
+        let choice = match choice {
+            Some(c) => c,
+            None => return serde_json::json!({"status": "end"}).to_string(),
+        };
+
+        // Set flag if specified
+        if let Some(flag) = &choice.set_flag {
+            self.state.event_flags.insert(flag.clone());
+        }
+
+        // Handle action
+        if let Some(action) = &choice.action {
+            match action.as_str() {
+                "heal_party" => {
+                    for sneaker in &mut self.state.player.party {
+                        sneaker.current_hp = sneaker.max_hp;
+                        sneaker.status = None;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Follow next_dialogue if specified
+        if let Some(next_id) = &choice.next_dialogue.clone() {
+            if let Some(data) = self.dialogue_db.get(next_id).cloned() {
+                let page = data.pages.first().cloned();
+                let page_json = page.map(|p| self.page_to_json_with_replacements(&p));
+                self.dialogue_state = Some(DialogueState::new(data));
+                return serde_json::json!({
+                    "status": "continue",
+                    "page": page_json.unwrap_or(serde_json::Value::Null),
+                }).to_string();
+            }
+        }
+
+        // End dialogue
+        self.dialogue_state = None;
+        self.state.mode = GameMode::Overworld;
+        serde_json::json!({"status": "end"}).to_string()
     }
 
     /// Process one game tick.
@@ -123,6 +284,42 @@ impl GameEngine {
                 "map_height": self.map_height,
                 "encounter": false,
                 "mode": "Battle",
+                "npcs": [],
+                "trainer_spotted": null,
+            })
+            .to_string();
+        }
+
+        // In dialogue mode, handle action key to advance
+        if self.state.mode == GameMode::Dialogue {
+            let action_pressed = input == "action" && !self.action_consumed;
+            if action_pressed {
+                self.action_consumed = true;
+                let advance_result = self.advance_dialogue_internal();
+                let _ = advance_result; // result communicated via state change
+            }
+            if input != "action" {
+                self.action_consumed = false;
+            }
+
+            let dialogue_page = self.dialogue_state.as_ref()
+                .and_then(|ds| ds.current())
+                .map(|p| self.page_to_json_with_replacements(p));
+
+            let npc_json = self.build_npc_json();
+            return serde_json::json!({
+                "player_x": self.state.player.x,
+                "player_y": self.state.player.y,
+                "facing": facing_str,
+                "moving": false,
+                "move_progress": 0.0,
+                "map_width": self.map_width,
+                "map_height": self.map_height,
+                "encounter": false,
+                "mode": format!("{:?}", self.state.mode),
+                "npcs": npc_json,
+                "trainer_spotted": self.trainer_spotted,
+                "dialogue_page": dialogue_page,
             })
             .to_string();
         }
@@ -135,6 +332,111 @@ impl GameEngine {
         };
 
         let action = parse_input(action_str);
+
+        // Handle trainer approach sequence
+        if self.trainer_spotted.is_some() {
+            self.trainer_approach_timer -= dt_ms;
+            let trainer_id = self.trainer_spotted.clone().unwrap();
+
+            // Find trainer NPC and move toward player
+            let player_x = self.state.player.x;
+            let player_y = self.state.player.y;
+
+            let trainer_adjacent = {
+                let npc = self.npcs.iter().find(|n| n.id == trainer_id);
+                if let Some(npc) = npc {
+                    let dx = (npc.x as isize - player_x as isize).abs();
+                    let dy = (npc.y as isize - player_y as isize).abs();
+                    dx + dy <= 1
+                } else {
+                    true // trainer not found, start battle
+                }
+            };
+
+            if trainer_adjacent {
+                // Start trainer battle
+                self.start_trainer_battle(&trainer_id);
+                self.trainer_spotted = None;
+                let facing_str2 = match self.state.player.facing {
+                    Direction::Up    => "up",
+                    Direction::Down  => "down",
+                    Direction::Left  => "left",
+                    Direction::Right => "right",
+                };
+                let npc_json = self.build_npc_json();
+                return serde_json::json!({
+                    "player_x": self.state.player.x,
+                    "player_y": self.state.player.y,
+                    "facing": facing_str2,
+                    "moving": false,
+                    "move_progress": 0.0,
+                    "map_width": self.map_width,
+                    "map_height": self.map_height,
+                    "encounter": false,
+                    "mode": format!("{:?}", self.state.mode),
+                    "npcs": npc_json,
+                    "trainer_spotted": serde_json::Value::Null,
+                })
+                .to_string();
+            } else if self.trainer_approach_timer <= 0.0 {
+                // Move trainer one step toward player
+                self.move_trainer_toward_player(&trainer_id);
+                self.trainer_approach_timer = 300.0; // move every 300ms
+            }
+
+            // Player is frozen during trainer approach
+            let npc_json = self.build_npc_json();
+            return serde_json::json!({
+                "player_x": self.state.player.x,
+                "player_y": self.state.player.y,
+                "facing": facing_str,
+                "moving": false,
+                "move_progress": 0.0,
+                "map_width": self.map_width,
+                "map_height": self.map_height,
+                "encounter": false,
+                "mode": "Overworld",
+                "npcs": npc_json,
+                "trainer_spotted": self.trainer_spotted,
+            })
+            .to_string();
+        }
+
+        // Handle action key (with edge detection)
+        if action_str == "action" && !self.action_consumed {
+            self.action_consumed = true;
+            // Try to interact with what's in front of the player
+            let interact_result_json = self.interact();
+            let v: serde_json::Value = serde_json::from_str(&interact_result_json).unwrap_or_default();
+            if v["type"] != "none" {
+                // Interaction occurred — return updated state
+                let facing_str2 = match self.state.player.facing {
+                    Direction::Up    => "up",
+                    Direction::Down  => "down",
+                    Direction::Left  => "left",
+                    Direction::Right => "right",
+                };
+                let npc_json = self.build_npc_json();
+                return serde_json::json!({
+                    "player_x": self.state.player.x,
+                    "player_y": self.state.player.y,
+                    "facing": facing_str2,
+                    "moving": false,
+                    "move_progress": 0.0,
+                    "map_width": self.map_width,
+                    "map_height": self.map_height,
+                    "encounter": false,
+                    "mode": format!("{:?}", self.state.mode),
+                    "npcs": npc_json,
+                    "trainer_spotted": self.trainer_spotted,
+                    "interaction": v,
+                })
+                .to_string();
+            }
+        }
+        if action_str != "action" {
+            self.action_consumed = false;
+        }
 
         // Get encounter table (may be empty if no map loaded)
         let wild_encounters: Vec<world::map::WildEncounterEntry> = self.current_map
@@ -174,9 +476,18 @@ impl GameEngine {
             }
         }
 
-        // Count non-encounter steps too
-        if !self.state.player.moving && events.is_empty() {
-            // No step completed this tick (either idle or mid-movement)
+        // Tick NPCs
+        if let Some(map) = &self.current_map.clone() {
+            let player_pos = (self.state.player.x, self.state.player.y);
+            tick_npcs(&mut self.npcs, player_pos, map, dt_ms, &mut self.rng);
+
+            // Check trainer line-of-sight
+            if self.trainer_spotted.is_none() {
+                if let Some(spotted_id) = check_trainer_triggers(&self.npcs, player_pos, map) {
+                    self.trainer_spotted = Some(spotted_id);
+                    self.trainer_approach_timer = 500.0; // brief pause before approach
+                }
+            }
         }
 
         let facing_str = match self.state.player.facing {
@@ -185,6 +496,8 @@ impl GameEngine {
             Direction::Left  => "left",
             Direction::Right => "right",
         };
+
+        let npc_json = self.build_npc_json();
 
         serde_json::json!({
             "player_x": self.state.player.x,
@@ -196,6 +509,8 @@ impl GameEngine {
             "map_height": self.map_height,
             "encounter": self.encounter_triggered,
             "mode": format!("{:?}", self.state.mode),
+            "npcs": npc_json,
+            "trainer_spotted": self.trainer_spotted,
         })
         .to_string()
     }
@@ -633,8 +948,165 @@ impl GameEngine {
         self.map_width = map_data.width as usize;
         self.map_height = map_data.height as usize;
         self.map = map_data.collision.clone();
+
+        // Initialize NPC runtime state from map definitions
+        self.npcs = map_data.npcs.iter().map(|def| {
+            let facing = NpcState::parse_facing(&def.facing);
+            let trainer_data = if def.is_trainer {
+                Some(TrainerNpcData {
+                    trainer_id: def.trainer_id,
+                    sight_range: def.sight_range,
+                })
+            } else {
+                None
+            };
+            NpcState {
+                id: def.id.clone(),
+                x: def.x,
+                y: def.y,
+                facing,
+                sprite: def.sprite.clone(),
+                movement: def.movement.clone(),
+                dialogue_id: def.dialogue_id.clone(),
+                is_trainer: def.is_trainer,
+                trainer_data,
+                defeated: def.defeated_flag.as_ref()
+                    .map(|f| self.state.event_flags.contains(f))
+                    .unwrap_or(false),
+                moving: false,
+                move_progress: 0.0,
+                move_timer: 2000.0,
+                home_x: def.x,
+                home_y: def.y,
+                patrol_index: 0,
+            }
+        }).collect();
+
         self.current_map = Some(map_data);
         Ok(())
+    }
+
+    /// Internal dialogue loader — not exposed to WASM directly but usable in tests.
+    pub fn load_dialogue_json(&mut self, json: &str) -> Result<(), String> {
+        let dialogues: Vec<DialogueData> = serde_json::from_str(json)
+            .map_err(|e| format!("Failed to parse dialogue JSON: {}", e))?;
+        for d in dialogues {
+            self.dialogue_db.insert(d.id.clone(), d);
+        }
+        Ok(())
+    }
+
+    /// Advance dialogue without returning JSON (used internally from tick).
+    fn advance_dialogue_internal(&mut self) {
+        let has_next = self.dialogue_state.as_mut().map(|ds| ds.advance()).unwrap_or(false);
+        if !has_next {
+            self.dialogue_state = None;
+            self.state.mode = GameMode::Overworld;
+        }
+    }
+
+    /// Build NPC JSON array for tick return.
+    fn build_npc_json(&self) -> Vec<serde_json::Value> {
+        self.npcs.iter().map(|npc| {
+            serde_json::json!({
+                "id": npc.id,
+                "x": npc.x,
+                "y": npc.y,
+                "facing": npc.facing_str(),
+                "sprite": npc.sprite,
+                "moving": npc.moving,
+                "move_progress": npc.move_progress,
+                "is_trainer": npc.is_trainer,
+                "defeated": npc.defeated,
+            })
+        }).collect()
+    }
+
+    /// Convert a DialoguePage to JSON with template replacements applied.
+    fn page_to_json_with_replacements(&self, page: &world::dialogue::DialoguePage) -> serde_json::Value {
+        let text = world::dialogue::replace_template_vars(&page.text, &self.state.player.name);
+        let speaker = page.speaker.as_ref().map(|s| {
+            world::dialogue::replace_template_vars(s, &self.state.player.name)
+        });
+        serde_json::json!({
+            "speaker": speaker,
+            "text": text,
+            "choices": page.choices,
+        })
+    }
+
+    /// Move the spotted trainer one step toward the player.
+    fn move_trainer_toward_player(&mut self, trainer_id: &str) {
+        let player_x = self.state.player.x;
+        let player_y = self.state.player.y;
+
+        let npc_pos = self.npcs.iter().find(|n| n.id == trainer_id)
+            .map(|n| (n.x, n.y));
+
+        if let Some((nx, ny)) = npc_pos {
+            let dx = player_x as isize - nx as isize;
+            let dy = player_y as isize - ny as isize;
+
+            let dir = if dx.abs() >= dy.abs() {
+                if dx > 0 { Direction::Right } else { Direction::Left }
+            } else {
+                if dy > 0 { Direction::Down } else { Direction::Up }
+            };
+
+            let (ddx, ddy) = dir.delta();
+            let new_x = (nx as isize + ddx) as u16;
+            let new_y = (ny as isize + ddy) as u16;
+
+            if let Some(npc) = self.npcs.iter_mut().find(|n| n.id == trainer_id) {
+                npc.facing = dir;
+                if self.map.get(new_y as usize * self.map_width + new_x as usize)
+                    .map(|&t| t != 1)
+                    .unwrap_or(false)
+                {
+                    npc.x = new_x;
+                    npc.y = new_y;
+                }
+            }
+        }
+    }
+
+    /// Start a trainer battle when they reach the player.
+    fn start_trainer_battle(&mut self, trainer_id: &str) {
+        let trainer_info = self.npcs.iter().find(|n| n.id == trainer_id)
+            .and_then(|n| n.trainer_data.as_ref())
+            .map(|td| (td.trainer_id, format!("Trainer {}", td.trainer_id)));
+
+        let (tid, tname) = trainer_info.unwrap_or((0, "Trainer".to_string()));
+
+        // Generate a simple opponent team (level 5 sneaker)
+        let opp_sneaker = generate_wild_sneaker(1, 5, &mut self.rng);
+        let battle_state = BattleState {
+            kind: BattleKind::Trainer { id: tid, name: tname },
+            player_active: 0,
+            opponent: BattleOpponent {
+                team: vec![opp_sneaker],
+                items: vec![],
+                ai_level: AiLevel::Basic,
+            },
+            opponent_active: 0,
+            turn_number: 0,
+            player_stages: Default::default(),
+            opponent_stages: Default::default(),
+            turn_log: vec![],
+            flee_attempts: 0,
+            can_flee: false,
+            waiting_for: None,
+            player_skip_turn: false,
+            opponent_skip_turn: false,
+        };
+
+        self.battle = Some(battle_state);
+        self.state.mode = GameMode::Battle;
+
+        // Mark trainer as defeated (will be set properly when battle ends)
+        if let Some(npc) = self.npcs.iter_mut().find(|n| n.id == trainer_id) {
+            npc.defeated = true;
+        }
     }
 }
 

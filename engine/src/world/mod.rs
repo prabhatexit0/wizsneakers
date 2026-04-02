@@ -1,6 +1,9 @@
 pub mod map;
 pub mod encounters;
 pub mod movement;
+pub mod dialogue;
+pub mod npc;
+pub mod events;
 
 #[cfg(test)]
 mod tests_phase_2a {
@@ -238,5 +241,352 @@ mod tests_phase_2a {
             }
         }
         assert!(triggered, "encounter should trigger within 200 tall-grass steps");
+    }
+}
+
+#[cfg(test)]
+mod tests_phase_6 {
+    use crate::world::dialogue::{DialogueData, DialoguePage, DialogueState, replace_template_vars};
+    use crate::world::npc::{NpcState, TrainerNpcData, tick_npcs, check_trainer_triggers};
+    use crate::world::map::{MapData, NpcMovement};
+    use crate::state::player::Direction;
+    use crate::util::rng::SeededRng;
+    use crate::GameEngine;
+
+    fn make_map_10x10() -> MapData {
+        let mut collision = vec![0u8; 100];
+        // Border walls
+        for x in 0..10usize { collision[x] = 1; collision[90 + x] = 1; }
+        for y in 0..10usize { collision[y * 10] = 1; collision[y * 10 + 9] = 1; }
+        // Wall at (4,4)
+        collision[4 * 10 + 4] = 1;
+
+        let json = format!(r#"{{
+            "id": "phase6_test",
+            "name": "Phase 6 Test",
+            "width": 10,
+            "height": 10,
+            "collision": {:?},
+            "ground": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            "overlay": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            "connections": {{"north": null, "south": null, "east": null, "west": null}},
+            "wild_encounters": [],
+            "npcs": [],
+            "events": [],
+            "music": ""
+        }}"#, collision);
+        MapData::from_json(&json).unwrap()
+    }
+
+    fn make_npc(id: &str, x: u16, y: u16, dialogue_id: &str) -> NpcState {
+        NpcState {
+            id: id.to_string(),
+            x, y,
+            facing: Direction::Down,
+            sprite: "npc".to_string(),
+            movement: NpcMovement::Stationary,
+            dialogue_id: dialogue_id.to_string(),
+            is_trainer: false,
+            trainer_data: None,
+            defeated: false,
+            moving: false,
+            move_progress: 0.0,
+            move_timer: 0.0,
+            home_x: x,
+            home_y: y,
+            patrol_index: 0,
+        }
+    }
+
+    // ── Dialogue tests ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn template_replacement_player_name() {
+        let result = replace_template_vars("Hi {player_name}!", "Red");
+        assert_eq!(result, "Hi Red!");
+    }
+
+    #[test]
+    fn multi_page_dialogue_advances_correctly() {
+        let data = DialogueData {
+            id: "test".to_string(),
+            pages: vec![
+                DialoguePage { speaker: None, text: "Page 1".to_string(), choices: None },
+                DialoguePage { speaker: None, text: "Page 2".to_string(), choices: None },
+                DialoguePage { speaker: None, text: "Page 3".to_string(), choices: None },
+            ],
+        };
+        let mut state = DialogueState::new(data);
+        assert_eq!(state.current().unwrap().text, "Page 1");
+        assert!(state.advance());
+        assert_eq!(state.current().unwrap().text, "Page 2");
+        assert!(state.advance());
+        assert_eq!(state.current().unwrap().text, "Page 3");
+        // Should not advance past last page
+        assert!(!state.advance());
+        assert_eq!(state.current().unwrap().text, "Page 3");
+    }
+
+    #[test]
+    fn choices_set_flags_via_engine() {
+        let mut engine = GameEngine::new(42);
+        // Load a dialogue with a choice that sets a flag
+        let dialogue_json = r#"[{
+            "id": "choice_test",
+            "pages": [{
+                "speaker": null,
+                "text": "Choose!",
+                "choices": [
+                    {"text": "Yes", "next_dialogue": null, "set_flag": "said_yes", "action": null},
+                    {"text": "No", "next_dialogue": null, "set_flag": null, "action": null}
+                ]
+            }]
+        }]"#;
+        engine.load_dialogue_json(dialogue_json).unwrap();
+
+        // Set player position and facing to be next to NPC
+        engine.state.player.x = 5;
+        engine.state.player.y = 5;
+        engine.state.player.facing = Direction::Down;
+
+        // Manually put engine in dialogue mode with the choice dialogue
+        let data = engine.dialogue_db.get("choice_test").cloned().unwrap();
+        engine.dialogue_state = Some(crate::world::dialogue::DialogueState::new(data));
+        engine.state.mode = crate::state::GameMode::Dialogue;
+
+        // Select choice 0 (Yes) which sets "said_yes" flag
+        engine.select_choice(0);
+        assert!(
+            engine.state.event_flags.contains("said_yes"),
+            "selecting choice should set the associated flag"
+        );
+    }
+
+    // ── Interaction tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn facing_npc_and_interact_starts_dialogue() {
+        let mut engine = GameEngine::new(1);
+
+        // Place player at (5,5) facing down, NPC at (5,6)
+        engine.state.player.x = 5;
+        engine.state.player.y = 5;
+        engine.state.player.facing = Direction::Down;
+
+        engine.npcs.push(make_npc("guard", 5, 6, "guard_dialogue"));
+
+        // Load some dialogue for the NPC
+        let dialogue_json = r#"[{"id": "guard_dialogue", "pages": [{"speaker": "Guard", "text": "Halt!", "choices": null}]}]"#;
+        engine.load_dialogue_json(dialogue_json).unwrap();
+
+        let result = engine.interact();
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["type"], "dialogue", "interact should return dialogue type when facing NPC");
+        assert_eq!(engine.state.mode, crate::state::GameMode::Dialogue);
+    }
+
+    #[test]
+    fn facing_wall_no_interaction() {
+        let mut engine = GameEngine::new(1);
+        // Default map has walls at the border
+        // Player at (1,1) facing left → (0,1) is solid wall
+        engine.state.player.x = 1;
+        engine.state.player.y = 1;
+        engine.state.player.facing = Direction::Left;
+
+        let result = engine.interact();
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["type"], "none", "facing wall should return none");
+    }
+
+    #[test]
+    fn facing_sign_returns_sign_text() {
+        let mut engine = GameEngine::new(1);
+
+        // Load a map with a sign event
+        let map_json = r#"{
+            "id": "sign_test",
+            "name": "Sign Test",
+            "width": 10,
+            "height": 10,
+            "collision": [1,1,1,1,1,1,1,1,1,1, 1,0,0,0,0,0,0,0,0,1, 1,0,0,0,0,0,0,0,0,1, 1,0,0,0,0,0,0,0,0,1, 1,0,0,0,0,0,0,0,0,1, 1,0,0,0,0,0,0,0,0,1, 1,0,0,0,0,0,0,0,0,1, 1,0,0,0,0,0,0,0,0,1, 1,0,0,0,0,0,0,0,0,1, 1,1,1,1,1,1,1,1,1,1],
+            "ground": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            "overlay": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            "connections": {"north": null, "south": null, "east": null, "west": null},
+            "wild_encounters": [],
+            "npcs": [],
+            "events": [{"id": "sign1", "x": 5, "y": 3, "event_type": "sign", "data": "Boxfresh Town Pop. 50"}],
+            "music": ""
+        }"#;
+        engine.load_map_from_json(map_json).unwrap();
+
+        // Player at (5,4) facing up toward sign at (5,3)
+        engine.state.player.x = 5;
+        engine.state.player.y = 4;
+        engine.state.player.facing = Direction::Up;
+
+        let result = engine.interact();
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["type"], "sign", "interact should return sign type when facing sign");
+        assert_eq!(v["text"], "Boxfresh Town Pop. 50", "should return sign text");
+    }
+
+    // ── NPC movement tests ─────────────────────────────────────────────────────
+
+    fn make_movement_npc(id: &str, x: u16, y: u16, facing: Direction, movement: NpcMovement) -> NpcState {
+        NpcState {
+            id: id.to_string(),
+            x, y,
+            facing,
+            sprite: "npc".to_string(),
+            movement,
+            dialogue_id: String::new(),
+            is_trainer: false,
+            trainer_data: None,
+            defeated: false,
+            moving: false,
+            move_progress: 0.0,
+            move_timer: 0.0,
+            home_x: x,
+            home_y: y,
+            patrol_index: 0,
+        }
+    }
+
+    #[test]
+    fn stationary_npc_never_moves() {
+        let map = make_map_10x10();
+        let mut npcs = vec![make_movement_npc("npc1", 5, 5, Direction::Down, NpcMovement::Stationary)];
+        let mut rng = SeededRng::new(42);
+        for _ in 0..200 {
+            tick_npcs(&mut npcs, (3, 3), &map, 16.67, &mut rng);
+        }
+        assert_eq!(npcs[0].x, 5, "stationary NPC x should not change");
+        assert_eq!(npcs[0].y, 5, "stationary NPC y should not change");
+    }
+
+    #[test]
+    fn random_walk_npc_stays_within_radius() {
+        let map = make_map_10x10();
+        let radius = 2u8;
+        let home_x = 5u16;
+        let home_y = 5u16;
+        let mut npc = make_movement_npc("npc1", home_x, home_y, Direction::Down,
+            NpcMovement::RandomWalk { radius });
+        npc.home_x = home_x;
+        npc.home_y = home_y;
+        let mut npcs = vec![npc];
+        let mut rng = SeededRng::new(1);
+        for _ in 0..2000 {
+            tick_npcs(&mut npcs, (1, 1), &map, 16.67, &mut rng);
+        }
+        let dx = (npcs[0].x as isize - home_x as isize).abs();
+        let dy = (npcs[0].y as isize - home_y as isize).abs();
+        assert!(dx <= radius as isize, "NPC x {} exceeds home {} by more than radius {}", npcs[0].x, home_x, radius);
+        assert!(dy <= radius as isize, "NPC y {} exceeds home {} by more than radius {}", npcs[0].y, home_y, radius);
+    }
+
+    #[test]
+    fn face_player_npc_faces_player_direction() {
+        let map = make_map_10x10();
+        let mut npcs = vec![make_movement_npc("npc1", 5, 5, Direction::Down, NpcMovement::FacePlayer)];
+        let mut rng = SeededRng::new(1);
+        tick_npcs(&mut npcs, (7, 5), &map, 16.67, &mut rng);
+        assert_eq!(npcs[0].facing, Direction::Right, "should face right when player is to the right");
+        tick_npcs(&mut npcs, (5, 2), &map, 16.67, &mut rng);
+        assert_eq!(npcs[0].facing, Direction::Up, "should face up when player is above");
+    }
+
+    #[test]
+    fn npc_collision_two_npcs_cannot_occupy_same_tile() {
+        let map = make_map_10x10();
+        let mut npc1 = make_movement_npc("npc1", 5, 5, Direction::Down, NpcMovement::RandomWalk { radius: 1 });
+        npc1.home_x = 5; npc1.home_y = 5;
+        let mut npc2 = make_movement_npc("npc2", 5, 6, Direction::Down, NpcMovement::RandomWalk { radius: 1 });
+        npc2.home_x = 5; npc2.home_y = 6;
+        let mut npcs = vec![npc1, npc2];
+        let mut rng = SeededRng::new(99);
+        for _ in 0..500 {
+            tick_npcs(&mut npcs, (1, 1), &map, 16.67, &mut rng);
+            if !npcs[0].moving && !npcs[1].moving {
+                assert_ne!(
+                    (npcs[0].x, npcs[0].y),
+                    (npcs[1].x, npcs[1].y),
+                    "two NPCs should not occupy the same tile"
+                );
+            }
+        }
+    }
+
+    // ── Trainer line-of-sight tests ────────────────────────────────────────────
+
+    fn make_trainer_npc(id: &str, x: u16, y: u16, facing: Direction, sight: u8) -> NpcState {
+        NpcState {
+            id: id.to_string(),
+            x, y,
+            facing,
+            sprite: "trainer".to_string(),
+            movement: NpcMovement::Stationary,
+            dialogue_id: String::new(),
+            is_trainer: true,
+            trainer_data: Some(TrainerNpcData { trainer_id: 1, sight_range: sight }),
+            defeated: false,
+            moving: false,
+            move_progress: 0.0,
+            move_timer: 0.0,
+            home_x: x,
+            home_y: y,
+            patrol_index: 0,
+        }
+    }
+
+    #[test]
+    fn trainer_facing_right_player_within_sight_detected() {
+        let map = make_map_10x10();
+        let npcs = vec![make_trainer_npc("t1", 3, 5, Direction::Right, 4)];
+        let result = check_trainer_triggers(&npcs, (6, 5), &map);
+        assert_eq!(result, Some("t1".to_string()), "trainer should spot player 3 tiles right");
+    }
+
+    #[test]
+    fn trainer_facing_right_player_to_left_not_detected() {
+        let map = make_map_10x10();
+        let npcs = vec![make_trainer_npc("t1", 5, 5, Direction::Right, 4)];
+        let result = check_trainer_triggers(&npcs, (2, 5), &map);
+        assert!(result.is_none(), "trainer should not spot player behind them");
+    }
+
+    #[test]
+    fn wall_between_trainer_and_player_blocks_los() {
+        let map = make_map_10x10(); // Wall at (4,4)
+        let npcs = vec![make_trainer_npc("t1", 3, 4, Direction::Right, 4)];
+        // Player at (5,4) — wall at (4,4) blocks LOS from trainer (3,4)
+        let result = check_trainer_triggers(&npcs, (5, 4), &map);
+        assert!(result.is_none(), "wall should block trainer line-of-sight");
+    }
+
+    #[test]
+    fn defeated_trainer_not_detected() {
+        let map = make_map_10x10();
+        let mut trainer = make_trainer_npc("t1", 3, 5, Direction::Right, 4);
+        trainer.defeated = true;
+        let npcs = vec![trainer];
+        let result = check_trainer_triggers(&npcs, (6, 5), &map);
+        assert!(result.is_none(), "defeated trainer should not spot player");
+    }
+
+    #[test]
+    fn trainer_sight_range_respected() {
+        let map = make_map_10x10();
+        let sight = 3u8;
+        let npcs = vec![make_trainer_npc("t1", 3, 5, Direction::Right, sight)];
+        // Player at sight_range + 1 = 4 tiles away → NOT detected
+        let player_x_too_far = 3 + sight as u16 + 1;
+        let result = check_trainer_triggers(&npcs, (player_x_too_far, 5), &map);
+        assert!(result.is_none(), "player at range+1 should not be detected");
+        // Player at exactly sight_range = 3 tiles away → detected
+        let player_x_at_range = 3 + sight as u16;
+        let result2 = check_trainer_triggers(&npcs, (player_x_at_range, 5), &map);
+        assert_eq!(result2, Some("t1".to_string()), "player at exact sight range should be detected");
     }
 }
