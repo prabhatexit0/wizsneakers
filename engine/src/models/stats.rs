@@ -53,6 +53,27 @@ impl StatStages {
         }
     }
 
+    pub fn get(&self, stat: StatKind) -> i8 {
+        match stat {
+            StatKind::Hype => self.hype,
+            StatKind::Comfort => self.comfort,
+            StatKind::Drip => self.drip,
+            StatKind::Rarity => self.rarity,
+            StatKind::Durability => 0,
+        }
+    }
+
+    pub fn set_clamped(&mut self, stat: StatKind, value: i8) {
+        let v = value.max(-6).min(6);
+        match stat {
+            StatKind::Hype => self.hype = v,
+            StatKind::Comfort => self.comfort = v,
+            StatKind::Drip => self.drip = v,
+            StatKind::Rarity => self.rarity = v,
+            StatKind::Durability => {}
+        }
+    }
+
     pub fn modify(&mut self, stat: StatKind, amount: i8) {
         let current = match stat {
             StatKind::Hype => &mut self.hype,

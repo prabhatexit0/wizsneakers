@@ -1,4 +1,4 @@
-use crate::models::sneaker::{SneakerInstance, SneakerSpecies};
+use crate::models::sneaker::{SneakerInstance, SneakerSpecies, StatusCondition};
 use crate::models::moves::{MoveData, MoveCategory};
 use crate::models::stats::{StatKind, StatStages};
 use crate::util::rng::SeededRng;
@@ -12,8 +12,7 @@ pub struct DamageResult {
     pub type_multiplier: f64,
 }
 
-/// Calculate damage for an attack.
-/// Crit is determined by RNG (1/16 chance).
+/// Calculate damage for an attack (standard 1/16 crit rate).
 pub fn calculate_damage(
     attacker: &SneakerInstance,
     attacker_species: &SneakerSpecies,
@@ -24,7 +23,6 @@ pub fn calculate_damage(
     defender_stages: &StatStages,
     rng: &mut SeededRng,
 ) -> DamageResult {
-    // Status moves or moves with no power do 0 damage
     let power = match move_data.power {
         Some(p) if move_data.category != MoveCategory::Status => p as f64,
         _ => {
@@ -39,21 +37,14 @@ pub fn calculate_damage(
 
     let is_critical = rng.range(0, 16) == 0;
     calculate_damage_inner(
-        attacker,
-        attacker_species,
-        defender,
-        defender_species,
-        move_data,
-        attacker_stages,
-        defender_stages,
-        power,
-        is_critical,
-        rng,
+        attacker, attacker_species,
+        defender, defender_species,
+        move_data, attacker_stages, defender_stages,
+        power, is_critical, rng,
     )
 }
 
 /// Extended damage calculation with optional forced crit (for testing).
-/// Pass `force_critical = Some(true/false)` to override RNG crit roll.
 pub fn calculate_damage_ex(
     attacker: &SneakerInstance,
     attacker_species: &SneakerSpecies,
@@ -83,16 +74,35 @@ pub fn calculate_damage_ex(
     };
 
     calculate_damage_inner(
-        attacker,
-        attacker_species,
-        defender,
-        defender_species,
-        move_data,
-        attacker_stages,
-        defender_stages,
-        power,
-        is_critical,
-        rng,
+        attacker, attacker_species,
+        defender, defender_species,
+        move_data, attacker_stages, defender_stages,
+        power, is_critical, rng,
+    )
+}
+
+/// Damage with an explicit power override (for PowerEqualsLevel, etc.) and optional forced crit.
+pub fn calculate_damage_with_override(
+    attacker: &SneakerInstance,
+    attacker_species: &SneakerSpecies,
+    defender: &SneakerInstance,
+    defender_species: &SneakerSpecies,
+    move_data: &MoveData,
+    attacker_stages: &StatStages,
+    defender_stages: &StatStages,
+    power_override: f64,
+    force_critical: Option<bool>,
+    rng: &mut SeededRng,
+) -> DamageResult {
+    let is_critical = match force_critical {
+        Some(b) => b,
+        None => rng.range(0, 16) == 0,
+    };
+    calculate_damage_inner(
+        attacker, attacker_species,
+        defender, defender_species,
+        move_data, attacker_stages, defender_stages,
+        power_override, is_critical, rng,
     )
 }
 
@@ -111,8 +121,8 @@ fn calculate_damage_inner(
     let level = attacker.level as f64;
 
     // Attack stat: Hype for Physical, Drip for Special
-    // Crits ignore negative attack stages
-    let attack_stat = match move_data.category {
+    // Crits ignore negative attack stages.
+    let mut attack_stat = match move_data.category {
         MoveCategory::Physical => {
             let base = attacker.calc_stat(attacker_species, StatKind::Hype) as f64;
             let stage = if is_critical { attacker_stages.hype.max(0) } else { attacker_stages.hype };
@@ -126,8 +136,19 @@ fn calculate_damage_inner(
         MoveCategory::Status => unreachable!(),
     };
 
-    // Defense stat: always Comfort
-    // Crits ignore positive defense stages
+    // Status modifiers on attacker's Hype (physical only):
+    //   Scuffed:  -50% Hype
+    //   OnFire:   +50% Hype (volatile, checked via on_fire_turns)
+    if move_data.category == MoveCategory::Physical {
+        if matches!(attacker.status, Some(StatusCondition::Scuffed { .. })) {
+            attack_stat *= 0.5;
+        }
+        if attacker.on_fire_turns > 0 {
+            attack_stat *= 1.5;
+        }
+    }
+
+    // Defense stat: Comfort — crits ignore positive defense stages
     let def_base = defender.calc_stat(defender_species, StatKind::Comfort) as f64;
     let def_stage = if is_critical {
         defender_stages.comfort.min(0)
@@ -140,7 +161,7 @@ fn calculate_damage_inner(
     let level_factor = 2.0 * level / 5.0 + 2.0;
     let base = (level_factor * power * attack_stat / defense) / 50.0 + 2.0;
 
-    // STAB: 1.5x if move faction matches attacker faction
+    // STAB
     let stab = if move_data.faction == attacker_species.faction { 1.5_f64 } else { 1.0_f64 };
 
     // Type effectiveness

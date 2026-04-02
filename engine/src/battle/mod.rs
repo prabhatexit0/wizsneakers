@@ -8,4 +8,4 @@ pub use types::{
     BattleSide, BattleState, BattleTurnEvent, Effectiveness,
 };
 pub use engine::BattleEngine;
-pub use damage::{calculate_damage, calculate_damage_ex, DamageResult};
+pub use damage::{calculate_damage, calculate_damage_ex, calculate_damage_with_override, DamageResult};

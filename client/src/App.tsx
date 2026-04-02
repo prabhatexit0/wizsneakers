@@ -8,8 +8,11 @@ import {
   CANVAS_WIDTH,
   CANVAS_HEIGHT,
   TILE_PX,
+  TILE_SIZE,
+  RENDER_SCALE,
 } from './rendering/camera'
 import { renderTiles } from './rendering/tileRenderer'
+import { generateCharSheet, getCharSrc, CHAR_W, CHAR_H } from './rendering/sprites'
 
 type Facing = 'up' | 'down' | 'left' | 'right'
 
@@ -33,44 +36,7 @@ interface BattleStateUI {
   opponent: BattleSneakerInfo
 }
 
-/** Draw a small triangle on the player square indicating facing direction */
-function drawFacingIndicator(
-  ctx: CanvasRenderingContext2D,
-  drawX: number,
-  drawY: number,
-  facing: Facing,
-) {
-  const cx = drawX + TILE_PX / 2
-  const cy = drawY + TILE_PX / 2
-  const r = TILE_PX / 6
-
-  ctx.fillStyle = '#fff'
-  ctx.beginPath()
-  switch (facing) {
-    case 'up':
-      ctx.moveTo(cx, drawY + 4)
-      ctx.lineTo(cx - r, drawY + 4 + r * 1.5)
-      ctx.lineTo(cx + r, drawY + 4 + r * 1.5)
-      break
-    case 'down':
-      ctx.moveTo(cx, drawY + TILE_PX - 4)
-      ctx.lineTo(cx - r, drawY + TILE_PX - 4 - r * 1.5)
-      ctx.lineTo(cx + r, drawY + TILE_PX - 4 - r * 1.5)
-      break
-    case 'left':
-      ctx.moveTo(drawX + 4, cy)
-      ctx.lineTo(drawX + 4 + r * 1.5, cy - r)
-      ctx.lineTo(drawX + 4 + r * 1.5, cy + r)
-      break
-    case 'right':
-      ctx.moveTo(drawX + TILE_PX - 4, cy)
-      ctx.lineTo(drawX + TILE_PX - 4 - r * 1.5, cy - r)
-      ctx.lineTo(drawX + TILE_PX - 4 - r * 1.5, cy + r)
-      break
-  }
-  ctx.closePath()
-  ctx.fill()
-}
+let charSheet: HTMLCanvasElement | null = null
 
 function App() {
   const { engine, ready, error } = useWasm()
@@ -88,12 +54,15 @@ function App() {
     facing: Facing,
     moveProgress: number,
     mapW: number, mapH: number,
+    walkFrame?: number,
   ) => {
     const eng = engine.current
     const canvas = canvasRef.current
     if (!eng || !canvas) return
     const ctx = canvas.getContext('2d')
     if (!ctx) return
+
+    if (!charSheet) charSheet = generateCharSheet()
 
     // Camera tracks the interpolated player position
     const camera = calculateCamera(px, py, mapW, mapH, moveProgress, facing)
@@ -109,13 +78,16 @@ function App() {
     const renderX = (px + dx * moveProgress) * TILE_PX - camera.x
     const renderY = (py + dy * moveProgress) * TILE_PX - camera.y
 
-    ctx.fillStyle = '#ff6b6b'
-    ctx.fillRect(renderX + 6, renderY + 6, TILE_PX - 12, TILE_PX - 12)
-    ctx.strokeStyle = '#fff'
-    ctx.lineWidth = 2
-    ctx.strokeRect(renderX + 6, renderY + 6, TILE_PX - 12, TILE_PX - 12)
-
-    drawFacingIndicator(ctx, renderX, renderY, facing)
+    // Draw character sprite
+    const isMoving = moveProgress > 0
+    const frame = isMoving ? (walkFrame ?? 1) : 0
+    const { sx, sy } = getCharSrc(facing, frame)
+    const yOffset = (CHAR_H - TILE_SIZE) * RENDER_SCALE
+    ctx.imageSmoothingEnabled = false
+    ctx.drawImage(
+      charSheet, sx, sy, CHAR_W, CHAR_H,
+      renderX, renderY - yOffset, CHAR_W * RENDER_SCALE, CHAR_H * RENDER_SCALE,
+    )
   }, [engine])
 
   // Scroll battle log to bottom when it updates
@@ -166,11 +138,14 @@ function App() {
         setTimeout(() => setEncounter(false), 1500)
       }
 
-      setStepCount(eng.step_count())
+      const steps = eng.step_count()
+      setStepCount(steps)
+      const walkFrame = steps % 2 === 0 ? 1 : 2
       render(
         state.player_x, state.player_y,
         state.facing, state.move_progress,
         state.map_width, state.map_height,
+        walkFrame,
       )
     }, [engine, inputRef, render]),
     ready,
@@ -414,11 +389,8 @@ function App() {
         </div>
       )}
 
-      <div style={{ marginTop: 12, fontSize: 11, opacity: 0.5 }}>
-        <span style={{ color: '#4a4a5a' }}>■</span> Wall{' '}
-        <span style={{ color: '#3a5a40' }}>■</span> Floor{' '}
-        <span style={{ color: '#5a7a3a' }}>■</span> Tall Grass{' '}
-        <span style={{ color: '#ff6b6b' }}>■</span> Player
+      <div style={{ marginTop: 8, fontSize: 11, opacity: 0.4 }}>
+        Steps: {stepCount}
       </div>
     </div>
   )

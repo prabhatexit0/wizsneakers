@@ -120,6 +120,7 @@ pub fn generate_wild_sneaker(
         condition,
         moves,
         status: None,
+        on_fire_turns: 0,
         held_item: None,
         friendship: 70,
         caught_location: 0,

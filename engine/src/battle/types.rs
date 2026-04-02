@@ -73,6 +73,12 @@ pub struct BattleState {
     pub flee_attempts: u8,
     pub can_flee: bool,
     pub waiting_for: Option<BattlePrompt>,
+    /// Player's active sneaker must skip their next action (after using SkipNextTurn move).
+    #[serde(default)]
+    pub player_skip_turn: bool,
+    /// Opponent's active sneaker must skip their next action.
+    #[serde(default)]
+    pub opponent_skip_turn: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

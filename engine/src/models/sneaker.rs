@@ -26,6 +26,8 @@ pub struct SneakerSpecies {
     pub description: &'static str,
 }
 
+/// Major status conditions — only one can be active at a time.
+/// OnFire is volatile and tracked separately via `on_fire_turns` on SneakerInstance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StatusCondition {
     Creased,
@@ -33,7 +35,6 @@ pub enum StatusCondition {
     SoldOut { turns_left: u8 },
     Hypnotized { turns_left: u8 },
     Deflated,
-    OnFire { turns_left: u8 },
 }
 
 impl StatusCondition {
@@ -44,7 +45,6 @@ impl StatusCondition {
             StatusCondition::SoldOut { .. } => StatusType::SoldOut,
             StatusCondition::Hypnotized { .. } => StatusType::Hypnotized,
             StatusCondition::Deflated => StatusType::Deflated,
-            StatusCondition::OnFire { .. } => StatusType::OnFire,
         }
     }
 }
@@ -63,6 +63,10 @@ pub struct SneakerInstance {
     pub condition: Condition,
     pub moves: [Option<MoveSlot>; 4],
     pub status: Option<StatusCondition>,
+    /// Volatile OnFire status — can coexist with a major status.
+    /// Counts down each turn; 0 = not on fire.
+    #[serde(default)]
+    pub on_fire_turns: u8,
     pub held_item: Option<u16>,
     pub friendship: u8,
     pub caught_location: u16,
