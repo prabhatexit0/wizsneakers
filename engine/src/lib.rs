@@ -3,6 +3,7 @@ use serde::Serialize;
 
 pub mod models;
 pub mod util;
+pub mod data;
 
 // Re-export commonly used types
 pub use models::{Faction, Stats};
