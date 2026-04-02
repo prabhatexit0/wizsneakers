@@ -11,66 +11,130 @@ import {
 } from './rendering/camera'
 import { renderTiles } from './rendering/tileRenderer'
 
+type Facing = 'up' | 'down' | 'left' | 'right'
+
+/** Draw a small triangle on the player square indicating facing direction */
+function drawFacingIndicator(
+  ctx: CanvasRenderingContext2D,
+  drawX: number,
+  drawY: number,
+  facing: Facing,
+) {
+  const cx = drawX + TILE_PX / 2
+  const cy = drawY + TILE_PX / 2
+  const r = TILE_PX / 6
+
+  ctx.fillStyle = '#fff'
+  ctx.beginPath()
+  switch (facing) {
+    case 'up':
+      ctx.moveTo(cx, drawY + 4)
+      ctx.lineTo(cx - r, drawY + 4 + r * 1.5)
+      ctx.lineTo(cx + r, drawY + 4 + r * 1.5)
+      break
+    case 'down':
+      ctx.moveTo(cx, drawY + TILE_PX - 4)
+      ctx.lineTo(cx - r, drawY + TILE_PX - 4 - r * 1.5)
+      ctx.lineTo(cx + r, drawY + TILE_PX - 4 - r * 1.5)
+      break
+    case 'left':
+      ctx.moveTo(drawX + 4, cy)
+      ctx.lineTo(drawX + 4 + r * 1.5, cy - r)
+      ctx.lineTo(drawX + 4 + r * 1.5, cy + r)
+      break
+    case 'right':
+      ctx.moveTo(drawX + TILE_PX - 4, cy)
+      ctx.lineTo(drawX + TILE_PX - 4 - r * 1.5, cy - r)
+      ctx.lineTo(drawX + TILE_PX - 4 - r * 1.5, cy + r)
+      break
+  }
+  ctx.closePath()
+  ctx.fill()
+}
+
 function App() {
   const { engine, ready, error } = useWasm()
-  const direction = useInput()
+  const inputRef = useInput()
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [encounter, setEncounter] = useState(false)
   const [stepCount, setStepCount] = useState(0)
 
-  const render = useCallback(() => {
+  const render = useCallback((
+    px: number, py: number,
+    facing: Facing,
+    moveProgress: number,
+    mapW: number, mapH: number,
+  ) => {
     const eng = engine.current
     const canvas = canvasRef.current
     if (!eng || !canvas) return
-
     const ctx = canvas.getContext('2d')
     if (!ctx) return
 
-    const mapW = eng.map_width()
-    const mapH = eng.map_height()
-    const px = eng.player_x()
-    const py = eng.player_y()
-
-    // Calculate camera centered on player, clamped to map edges
-    const camera = calculateCamera(px, py, mapW, mapH)
+    // Camera tracks the interpolated player position
+    const camera = calculateCamera(px, py, mapW, mapH, moveProgress, facing)
     const tileRange = getVisibleTileRange(camera)
 
-    // Draw visible tiles only
     renderTiles(ctx, eng, camera, tileRange)
 
-    // Draw player relative to camera
-    const playerDrawX = px * TILE_PX - camera.x
-    const playerDrawY = py * TILE_PX - camera.y
+    // Interpolated render position
+    const facingDelta: Record<Facing, [number, number]> = {
+      up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0],
+    }
+    const [dx, dy] = facingDelta[facing]
+    const renderX = (px + dx * moveProgress) * TILE_PX - camera.x
+    const renderY = (py + dy * moveProgress) * TILE_PX - camera.y
+
     ctx.fillStyle = '#ff6b6b'
-    ctx.fillRect(playerDrawX + 6, playerDrawY + 6, TILE_PX - 12, TILE_PX - 12)
+    ctx.fillRect(renderX + 6, renderY + 6, TILE_PX - 12, TILE_PX - 12)
     ctx.strokeStyle = '#fff'
     ctx.lineWidth = 2
-    ctx.strokeRect(playerDrawX + 6, playerDrawY + 6, TILE_PX - 12, TILE_PX - 12)
+    ctx.strokeRect(renderX + 6, renderY + 6, TILE_PX - 12, TILE_PX - 12)
+
+    drawFacingIndicator(ctx, renderX, renderY, facing)
   }, [engine])
 
-  // Game tick
+  // Game loop: 60fps, passes dt to engine
   useGameLoop(
-    useCallback(() => {
+    useCallback((dt: number) => {
       const eng = engine.current
       if (!eng) return
 
-      eng.tick(direction.current)
+      const json = eng.tick(dt, inputRef.current)
+      const state = JSON.parse(json) as {
+        player_x: number
+        player_y: number
+        facing: Facing
+        moving: boolean
+        move_progress: number
+        map_width: number
+        map_height: number
+        encounter: boolean
+      }
 
-      if (eng.encounter_triggered()) {
+      if (state.encounter) {
         setEncounter(true)
         setTimeout(() => setEncounter(false), 1500)
       }
 
       setStepCount(eng.step_count())
-      render()
-    }, [engine, direction, render]),
+      render(
+        state.player_x, state.player_y,
+        state.facing, state.move_progress,
+        state.map_width, state.map_height,
+      )
+    }, [engine, inputRef, render]),
     ready,
   )
 
   // Initial render
   useEffect(() => {
-    if (ready) render()
-  }, [ready, render])
+    if (ready) {
+      const eng = engine.current
+      if (!eng) return
+      render(eng.player_x(), eng.player_y(), 'down', 0, eng.map_width(), eng.map_height())
+    }
+  }, [ready, render, engine])
 
   if (error) {
     return <div style={{ color: '#ff6b6b', padding: 40 }}>WASM Error: {error}</div>
@@ -86,7 +150,7 @@ function App() {
         WIZSNEAKERS
       </h1>
       <p style={{ fontSize: 12, marginBottom: 12, opacity: 0.7 }}>
-        WASD / Arrow Keys to move — Steps: {stepCount}
+        WASD / Arrow Keys to move · Z/Enter=Action · X=Cancel · Esc=Menu · Shift=Sprint — Steps: {stepCount}
       </p>
 
       <canvas

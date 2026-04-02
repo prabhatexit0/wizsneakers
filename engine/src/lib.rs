@@ -13,6 +13,7 @@ pub use util::rng::SeededRng;
 
 use state::player::Direction;
 use world::map::MapData;
+use world::movement::{parse_input, process_movement, GameEvent};
 
 // ── Tile types ──
 
@@ -86,59 +87,79 @@ impl GameEngine {
         self.load_map_from_json(json).map_err(|e| JsValue::from_str(&e))
     }
 
-    /// Process one game tick. direction: 0=none, 1=up, 2=down, 3=left, 4=right
-    pub fn tick(&mut self, direction: u8) {
+    /// Process one game tick.
+    ///
+    /// `dt_ms` — delta time in milliseconds since last frame.
+    /// `input` — string input: "up"/"down"/"left"/"right"/"action"/"cancel"/"menu"/"none"
+    ///           Prefix with "sprint_" to activate sprint mode (e.g. "sprint_right").
+    ///
+    /// Returns a JSON string with the full player + map state.
+    pub fn tick(&mut self, dt_ms: f64, input: &str) -> String {
         self.encounter_triggered = false;
 
-        let opt_dir = match direction {
-            1 => Some(Direction::Up),
-            2 => Some(Direction::Down),
-            3 => Some(Direction::Left),
-            4 => Some(Direction::Right),
-            _ => None,
+        // Parse sprint modifier and actual action
+        let (sprint, action_str) = if let Some(rest) = input.strip_prefix("sprint_") {
+            (true, rest)
+        } else {
+            (false, input)
         };
 
-        let dir = match opt_dir {
-            Some(d) => d,
-            None => return,
-        };
+        let action = parse_input(action_str);
 
-        let (dx, dy) = dir.delta();
-        self.state.player.facing = dir;
+        // Get encounter table (may be empty if no map loaded)
+        let wild_encounters: Vec<world::map::WildEncounterEntry> = self.current_map
+            .as_ref()
+            .map(|m| m.wild_encounters.clone())
+            .unwrap_or_default();
 
-        let nx = self.state.player.x as isize + dx;
-        let ny = self.state.player.y as isize + dy;
+        let events = process_movement(
+            &mut self.state.player,
+            action,
+            dt_ms,
+            sprint,
+            &self.map,
+            self.map_width,
+            self.map_height,
+            &wild_encounters,
+            &mut self.rng,
+        );
 
-        if nx < 0 || ny < 0 || nx >= self.map_width as isize || ny >= self.map_height as isize {
-            return;
-        }
-
-        let (nx, ny) = (nx as usize, ny as usize);
-        let tile = self.map[ny * self.map_width + nx];
-
-        if tile == 1 {
-            return;
-        }
-
-        self.state.player.x = nx as u16;
-        self.state.player.y = ny as u16;
-        self.step_count += 1;
-
-        // Tall grass encounter check (~15% chance)
-        if tile == 2 && self.rng.chance(15) {
-            if let Some(ref map) = self.current_map {
-                // Use the map's encounter table for weighted species selection
-                if let Some(_result) = world::encounters::check_wild_encounter(
-                    &map.wild_encounters,
-                    &mut self.rng,
-                ) {
+        for ev in &events {
+            match ev {
+                GameEvent::WildEncounter { .. } => {
                     self.encounter_triggered = true;
+                    self.step_count += 1;
                 }
-            } else {
-                // Fallback: hardcoded map has no encounter table
-                self.encounter_triggered = true;
+                GameEvent::None => {}
+                _ => {
+                    self.step_count += 1;
+                }
             }
         }
+
+        // Count non-encounter steps too
+        if !self.state.player.moving && events.is_empty() {
+            // No step completed this tick (either idle or mid-movement)
+        }
+
+        let facing_str = match self.state.player.facing {
+            Direction::Up    => "up",
+            Direction::Down  => "down",
+            Direction::Left  => "left",
+            Direction::Right => "right",
+        };
+
+        serde_json::json!({
+            "player_x": self.state.player.x,
+            "player_y": self.state.player.y,
+            "facing": facing_str,
+            "moving": self.state.player.moving,
+            "move_progress": self.state.player.move_progress,
+            "map_width": self.map_width,
+            "map_height": self.map_height,
+            "encounter": self.encounter_triggered,
+        })
+        .to_string()
     }
 
     // ── Getters for JS ──
@@ -150,6 +171,20 @@ impl GameEngine {
     pub fn step_count(&self) -> u32 { self.step_count }
     pub fn encounter_triggered(&self) -> bool { self.encounter_triggered }
 
+    /// Get player facing direction: 1=up, 2=down, 3=left, 4=right
+    pub fn player_facing(&self) -> u8 {
+        match self.state.player.facing {
+            Direction::Up    => 1,
+            Direction::Down  => 2,
+            Direction::Left  => 3,
+            Direction::Right => 4,
+        }
+    }
+
+    pub fn player_moving(&self) -> bool { self.state.player.moving }
+
+    pub fn player_move_progress(&self) -> f32 { self.state.player.move_progress }
+
     /// Get tile at position (returns collision byte)
     pub fn get_tile(&self, x: usize, y: usize) -> u8 {
         if x >= self.map_width || y >= self.map_height {
@@ -160,9 +195,18 @@ impl GameEngine {
 
     /// Get state as JSON for UI overlays
     pub fn state_json(&self) -> String {
+        let facing_str = match self.state.player.facing {
+            Direction::Up    => "up",
+            Direction::Down  => "down",
+            Direction::Left  => "left",
+            Direction::Right => "right",
+        };
         serde_json::json!({
             "player_x": self.state.player.x,
             "player_y": self.state.player.y,
+            "facing": facing_str,
+            "moving": self.state.player.moving,
+            "move_progress": self.state.player.move_progress,
             "step_count": self.step_count,
             "encounter": self.encounter_triggered,
             "map_width": self.map_width,

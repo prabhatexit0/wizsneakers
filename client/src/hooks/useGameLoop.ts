@@ -8,21 +8,12 @@ export function useGameLoop(callback: (dt: number) => void, active: boolean) {
     if (!active) return
 
     let rafId: number
-    let lastTime = 0
-    // Tick rate limiter: move every ~150ms for grid-based feel
-    let accumulator = 0
-    const TICK_INTERVAL = 150
+    let lastTime: number | null = null
 
     function frame(time: number) {
-      const dt = lastTime ? time - lastTime : 0
+      const dt = lastTime != null ? time - lastTime : 16.67
       lastTime = time
-      accumulator += dt
-
-      if (accumulator >= TICK_INTERVAL) {
-        callbackRef.current(accumulator)
-        accumulator = 0
-      }
-
+      callbackRef.current(dt)
       rafId = requestAnimationFrame(frame)
     }
 

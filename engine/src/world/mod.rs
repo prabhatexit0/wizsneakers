@@ -1,5 +1,6 @@
 pub mod map;
 pub mod encounters;
+pub mod movement;
 
 #[cfg(test)]
 mod tests_phase_2a {
@@ -36,6 +37,17 @@ mod tests_phase_2a {
         "events": [],
         "music": "test_bgm"
     }"#;
+
+    // Helper: tick enough frames to complete one movement step
+    fn complete_step(engine: &mut GameEngine, dir: &str) {
+        engine.tick(16.67, dir);
+        for _ in 0..20 {
+            if !engine.player_moving() {
+                break;
+            }
+            engine.tick(16.67, "none");
+        }
+    }
 
     // ── Map parsing ────────────────────────────────────────────────────────────
 
@@ -200,7 +212,7 @@ mod tests_phase_2a {
         // Player starts at (3,3). Move right → (4,3) is solid border.
         let before_x = engine.player_x();
         let before_y = engine.player_y();
-        engine.tick(4); // direction 4 = right
+        engine.tick(16.67, "right");
         assert_eq!(engine.player_x(), before_x, "x should be unchanged after hitting wall");
         assert_eq!(engine.player_y(), before_y, "y should be unchanged after hitting wall");
     }
@@ -212,14 +224,14 @@ mod tests_phase_2a {
         engine.load_map_from_json(TEST_MAP_JSON).expect("map should load");
 
         // From (3,3): up → (3,2), up → (3,1) [tall grass]
-        engine.tick(1); // up
-        engine.tick(1); // up — now at (3,1) tall grass
+        complete_step(&mut engine, "up");
+        complete_step(&mut engine, "up"); // now at (3,1) tall grass
 
-        // Step left/right between (2,1) and (3,1) up to 200 times
+        // Step left/right between (2,1) and (3,1) up to 200 full steps
         let mut triggered = false;
         for i in 0..200 {
-            let d = if i % 2 == 0 { 3u8 } else { 4u8 }; // left/right
-            engine.tick(d);
+            let d = if i % 2 == 0 { "left" } else { "right" };
+            complete_step(&mut engine, d);
             if engine.encounter_triggered() {
                 triggered = true;
                 break;

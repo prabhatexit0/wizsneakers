@@ -4,6 +4,28 @@ mod tests_phase_1c {
     use crate::state::player::Direction;
     use crate::GameEngine;
 
+    /// Helper: perform a complete movement step in the given direction.
+    /// Calls tick until movement animation completes (or max 30 frames).
+    fn complete_step(engine: &mut GameEngine, dir: &str) {
+        engine.tick(16.67, dir);
+        for _ in 0..30 {
+            if !engine.player_moving() {
+                break;
+            }
+            engine.tick(16.67, "none");
+        }
+    }
+
+    fn dir_str(d: u8) -> &'static str {
+        match d {
+            1 => "up",
+            2 => "down",
+            3 => "left",
+            4 => "right",
+            _ => "none",
+        }
+    }
+
     // ── GameState initialization ──────────────────────────────────────────────
 
     #[test]
@@ -95,11 +117,11 @@ mod tests_phase_1c {
         let mut e1 = GameEngine::new(42);
         let mut e2 = GameEngine::new(42);
 
-        // Navigate to tall grass (up to y=2, right×6 to x=9), then step back/forth
+        // Navigate to tall grass: up to (3,2), right×6 to (9,2) [tall grass], then step back/forth
         let dirs: &[u8] = &[1, 4, 4, 4, 4, 4, 4, 3, 4, 3, 4, 3, 4, 3, 4, 3, 4, 3, 4, 3];
         for &d in dirs {
-            e1.tick(d);
-            e2.tick(d);
+            complete_step(&mut e1, dir_str(d));
+            complete_step(&mut e2, dir_str(d));
             assert_eq!(
                 e1.encounter_triggered(),
                 e2.encounter_triggered(),
@@ -111,26 +133,22 @@ mod tests_phase_1c {
 
     #[test]
     fn different_seed_produces_different_sequence() {
-        // Navigate both engines to tall grass (y=2, x=8..10 is tall grass).
-        // Wall at x=5 only exists for y in 3..7, so row y=2 is unobstructed.
-        // Path: up(1) to (3,2), then right(4) x6 to (9,2) [tall grass], then
-        // repeatedly left/right between (8,2) and (9,2) to collect many encounters.
         let mut e1 = GameEngine::new(1);
         let mut e2 = GameEngine::new(999999);
 
-        // Walk to tall grass
-        let setup: &[u8] = &[1, 4, 4, 4, 4, 4, 4]; // up then right×6 → (9,2)
+        // Walk to tall grass: up then right×6 → (9,2)
+        let setup: &[u8] = &[1, 4, 4, 4, 4, 4, 4];
         for &d in setup {
-            e1.tick(d);
-            e2.tick(d);
+            complete_step(&mut e1, dir_str(d));
+            complete_step(&mut e2, dir_str(d));
         }
 
         // Step back and forth in tall grass 40 times
         let mut any_diff = false;
         for i in 0..40 {
             let d = if i % 2 == 0 { 3u8 } else { 4u8 }; // alternate left/right
-            e1.tick(d);
-            e2.tick(d);
+            complete_step(&mut e1, dir_str(d));
+            complete_step(&mut e2, dir_str(d));
             if e1.encounter_triggered() != e2.encounter_triggered() {
                 any_diff = true;
                 break;
@@ -142,7 +160,33 @@ mod tests_phase_1c {
         );
     }
 
-    // ── Backward compatibility ────────────────────────────────────────────────
+    // ── Movement via new string API ───────────────────────────────────────────
+
+    #[test]
+    fn tick_string_input_moves_player() {
+        let mut engine = GameEngine::new(0);
+        // Start at (3,3), complete a full step right to (4,3)
+        complete_step(&mut engine, "right");
+        assert_eq!(engine.player_x(), 4);
+        assert_eq!(engine.player_y(), 3);
+    }
+
+    #[test]
+    fn player_x_y_correct_after_movement() {
+        let mut engine = GameEngine::new(0);
+        // Start at (3,3), move right to (4,3)
+        complete_step(&mut engine, "right");
+        assert_eq!(engine.player_x(), 4);
+        assert_eq!(engine.player_y(), 3);
+        // Move down to (4,4)
+        complete_step(&mut engine, "down");
+        assert_eq!(engine.player_x(), 4);
+        assert_eq!(engine.player_y(), 4);
+        // Move down to (4,5)
+        complete_step(&mut engine, "down");
+        assert_eq!(engine.player_x(), 4);
+        assert_eq!(engine.player_y(), 5);
+    }
 
     #[test]
     fn game_engine_new_with_seed_returns_valid_engine() {
@@ -151,31 +195,5 @@ mod tests_phase_1c {
         assert_eq!(engine.player_y(), 3);
         assert_eq!(engine.map_width(), 20);
         assert_eq!(engine.map_height(), 15);
-    }
-
-    #[test]
-    fn tick_still_works_with_direction_as_u8() {
-        let mut engine = GameEngine::new(0);
-        // direction 4 = right, start at (3,3)
-        engine.tick(4);
-        assert_eq!(engine.player_x(), 4);
-        assert_eq!(engine.player_y(), 3);
-    }
-
-    #[test]
-    fn player_x_y_correct_after_movement() {
-        let mut engine = GameEngine::new(0);
-        // Start at (3,3), move right once to (4,3)
-        engine.tick(4);
-        assert_eq!(engine.player_x(), 4);
-        assert_eq!(engine.player_y(), 3);
-        // Move down once to (4,4)
-        engine.tick(2);
-        assert_eq!(engine.player_x(), 4);
-        assert_eq!(engine.player_y(), 4);
-        // Move down again to (4,5) — wall at x=5,y=3..7, but x=4 is clear
-        engine.tick(2);
-        assert_eq!(engine.player_x(), 4);
-        assert_eq!(engine.player_y(), 5);
     }
 }
