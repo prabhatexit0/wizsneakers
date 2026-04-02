@@ -1,56 +1,11 @@
 use wasm_bindgen::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-// ── Faction (type) system ──
+pub mod models;
+pub mod util;
 
-#[wasm_bindgen]
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub enum Faction {
-    Normal,
-    Retro,
-    Techwear,
-    Skate,
-    HighFashion,
-}
-
-// ── Sneaker stats ──
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Stats {
-    pub durability: u32, // HP
-    pub hype: u32,       // Attack
-    pub comfort: u32,    // Defense
-    pub drip: u32,       // Special Attack
-    pub rarity: u32,     // Speed
-}
-
-// ── Sneaker species ──
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Sneaker {
-    pub id: u16,
-    pub name: String,
-    pub faction: Faction,
-    pub base_stats: Stats,
-    pub level: u32,
-    pub current_hp: u32,
-    pub max_hp: u32,
-}
-
-impl Sneaker {
-    pub fn new(id: u16, name: &str, faction: Faction, base: Stats, level: u32) -> Self {
-        let max_hp = ((2 * base.durability + 15) * level / 100) + level + 10;
-        Self {
-            id,
-            name: name.to_string(),
-            faction,
-            base_stats: base,
-            level,
-            current_hp: max_hp,
-            max_hp,
-        }
-    }
-}
+// Re-export commonly used types
+pub use models::{Faction, Stats};
 
 // ── Tile types ──
 
