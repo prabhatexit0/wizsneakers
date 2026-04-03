@@ -48,7 +48,7 @@ function App() {
   const [gameMode, setGameMode] = useState<string>('Overworld')
   const [dialoguePage, setDialoguePage] = useState<DialoguePage | null>(null)
   const [trainerSpotted, setTrainerSpotted] = useState<string | null>(null)
-  const [npcsState, setNpcsState] = useState<NpcRenderInfo[]>([])
+  const [_npcsState, setNpcsState] = useState<NpcRenderInfo[]>([])
   const [appState, setAppState] = useState<AppState>('title')
   const [pauseOpen, setPauseOpen] = useState(false)
   const pauseOpenRef = useRef(false)

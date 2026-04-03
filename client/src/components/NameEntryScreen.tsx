@@ -40,8 +40,6 @@ export function NameEntryScreen({ onConfirm }: Props) {
     return () => window.removeEventListener('keydown', handleKey)
   }, [name, onConfirm])
 
-  const displayName = name || DEFAULT_NAME
-
   return (
     <div
       style={{

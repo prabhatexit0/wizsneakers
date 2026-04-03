@@ -27,10 +27,8 @@ export function TransitionOverlay({ type, onComplete }: Props) {
       return
     }
 
-    const color = type === 'warp' ? 'white' : 'black'
     const fadeInMs  = type === 'warp' ? 100 : 150
     const holdMs    = type === 'warp' ? 50  : 100
-    const fadeOutMs = type === 'warp' ? 200 : 150
 
     // Fade in
     setOpacity(1)

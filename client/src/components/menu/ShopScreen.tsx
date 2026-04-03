@@ -30,7 +30,7 @@ const DEFAULT_SHOP_STOCK: number[] = [1, 2, 3, 5, 6, 7, 8, 9, 10, 30, 31]
 type ShopTab = 'buy' | 'sell'
 
 export function ShopScreen({ engine, onClose }: ShopScreenProps) {
-  const anyEng = engine as unknown as Record<string, (...args: unknown[]) => string | number>
+  const anyEng = engine as unknown as Record<string, (...args: unknown[]) => string>
   const [tab, setTab] = useState<ShopTab>('buy')
   const [itemIdx, setItemIdx] = useState(0)
   const [qty, setQty] = useState(1)
